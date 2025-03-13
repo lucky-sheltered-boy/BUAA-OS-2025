@@ -1,0 +1,44 @@
+#include <stdio.h>
+void output1();
+void output2();
+void output3();
+void output4();
+void output5();
+void output6();
+void output7();
+void output8();
+void output9();
+void output10();
+void output11();
+void output12();
+void output13();
+void output14();
+void output15();
+void output16();
+void output17();
+void output18();
+void output19();
+void output20();
+int main() {
+    output1();
+    output2();
+    output3();
+    output4();
+    output5();
+    output6();
+    output7();
+    output8();
+    output9();
+    output10();
+    output11();
+    output12();
+    output13();
+    output14();
+    output15();
+    output16();
+    output17();
+    output18();
+    output19();
+    output20();
+    return 0;
+}
