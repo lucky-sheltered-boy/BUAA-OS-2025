@@ -1,12 +1,8 @@
 #!/bin/bash
 
 mkdir codeSet
-i=1
-while [ $i -le 10 ]
+for file in $(ls code/)
 do
-	sed  "1i\\#include\"include/libsy.h\"" code/code${i}.sy > codeSet/code${i}.c
-	sed -i "s/getInt/getint/g" codeSet/code${i}.c
-	let i=i+1
+	sed  "1i\\#include\"include/libsy.h\"" code/${file} > codeSet/$(basename -s .sy ${file}).c
+	sed -i "s/getInt/getint/g" codeSet/$(basename -s .sy ${file}).c
 done
-sed  "1i\\#include\"include/libsy.h\"" code/wa.sy > codeSet/wa.c
-sed -i "s/getInt/getint/g" codeSet/wa.c
