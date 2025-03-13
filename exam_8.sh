@@ -1,3 +1,3 @@
 #!/bin/bash
 
-chmod 420 stderr.txt
+chmod 440 stderr.txt
