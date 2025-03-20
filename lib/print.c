@@ -52,7 +52,7 @@ void vprintfmt(fmt_callback_t out, void *data, const char *fmt, va_list ap) {
 		/* get width */
 		/* Exercise 1.4: Your code here. (6/8) */
 		long_flag = 0;
-		if ((*fmt) == 'l') {
+		while ((*fmt) == 'l') {
 			long_flag = 1;
 			fmt++;
 		}
