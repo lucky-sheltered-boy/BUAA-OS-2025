@@ -11,3 +11,5 @@ hello: hello.c
 
 clean:
 	rm -f *.o readelf hello
+readelf2: main.o readelf.o
+	$(CC) $^ -o $@ -m64
