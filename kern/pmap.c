@@ -579,16 +579,11 @@ void free(void *p) {
 	}
 	if (LIST_NEXT(mbl, mb_link) != NULL && LIST_NEXT(mbl, mb_link)->free == 1) {
 		mbl->size += MBLOCK_SIZE + LIST_NEXT(mbl, mb_link)->size;
-		LIST_NEXT(mbl, mb_link) = LIST_NEXT(LIST_NEXT(mbl, mb_link), mb_link);
-		if (LIST_NEXT(LIST_NEXT(mbl, mb_link), mb_link) != NULL) {
-			MBLOCK_PREV(LIST_NEXT(LIST_NEXT(mbl, mb_link), mb_link), mb_link) = mbl;
-		}
-	} else if (MBLOCK_PREV(mbl, mb_link) != &mblock_list && MBLOCK_PREV(mbl, mb_link)->free == 1) {
-		MBLOCK_PREV(mbl, mb_link)->size += mbl->size + MBLOCK_SIZE;
-		LIST_NEXT(MBLOCK_PREV(mbl, mb_link), mb_link) = LIST_NEXT(mbl, mb_link);
-		if (LIST_NEXT(mbl, mb_link) != NULL) {
-			MBLOCK_PREV(LIST_NEXT(mbl, mb_link), mb_link) = MBLOCK_PREV(mbl, mb_link);
-		}
+		LIST_REMOVE(LIST_NEXT(mbl, mb_link), mb_link);
+
+	} else if (MBLOCK_PREV(mbl, mb_link) != &mblock_list && ((MBLOCK_PREV(mbl, mb_link))->free) == 1) {
+		(MBLOCK_PREV(mbl, mb_link))->size += mbl->size + MBLOCK_SIZE;
+		LIST_REMOVE(mbl, mb_link);
 	} else {
 		mbl->free = 1;
 	}
