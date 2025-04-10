@@ -59,5 +59,5 @@ SECTIONS {
 
 	bss_end = .;
 	. = 0x80800000;
-	end = . ;
+	end = 0x80800000 ;
 }
