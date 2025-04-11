@@ -543,21 +543,28 @@ void malloc_init() {
 
 void *malloc(size_t size) {
 	/* Your Code Here (1/2) */
+	printk("begin\n");
 	size_t dis = ROUND(size, 8);
 	struct MBlock *iter = LIST_FIRST(&mblock_list);
 	for (; iter != NULL; iter = LIST_NEXT(iter, mb_link)) {
+		printk("%x\n", iter);
 		if (iter->size >= dis && iter->free == 1) {
 			if (iter->size - dis < sizeof(struct MBlock) + 8) {
 				iter->free = 0;
 				return (void *)iter->data;
 			} else {
-				struct MBlock * p = (struct MBlock*) (iter->data + dis);
+				
+				printk("1\n");
+				struct MBlock * p = (struct MBlock*) ((void*)iter->data + dis);
 				p->size = iter->size - dis - sizeof(struct MBlock);
 				p->free = 1;
 				p->ptr = (void*) p->data;
+				printk("3\n");
 				LIST_INSERT_AFTER(iter, p, mb_link);
+				printk("4\n");
 				iter->size = dis;
 				iter->free = 0;
+				printk("2\n");
 				return (void*)iter->data;
 			}
 		}
@@ -580,7 +587,7 @@ void free(void *p) {
 	if (LIST_NEXT(mbl, mb_link) != NULL && LIST_NEXT(mbl, mb_link)->free == 1) {
 		mbl->size += MBLOCK_SIZE + LIST_NEXT(mbl, mb_link)->size;
 		LIST_REMOVE(LIST_NEXT(mbl, mb_link), mb_link);
-
+		mbl->free = 1;
 	} else if (MBLOCK_PREV(mbl, mb_link) != &mblock_list && ((MBLOCK_PREV(mbl, mb_link))->free) == 1) {
 		(MBLOCK_PREV(mbl, mb_link))->size += mbl->size + MBLOCK_SIZE;
 		LIST_REMOVE(mbl, mb_link);
