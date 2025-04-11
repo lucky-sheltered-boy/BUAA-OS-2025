@@ -516,3 +516,74 @@ void page_check(void) {
 
 	printk("page_check() succeeded!\n");
 }
+
+#include <malloc.h>
+
+struct MBlock_list mblock_list;
+
+void malloc_init() {
+
+        printk("malloc_init begin\n");
+
+        LIST_INIT(&mblock_list);
+
+        struct MBlock *heap_begin = (struct MBlock*) HEAP_BEGIN;
+
+        printk("heap_begin: 0x%X\n", heap_begin);
+
+        heap_begin->size = HEAP_SIZE - MBLOCK_SIZE;
+        heap_begin->ptr = (void*) heap_begin->data;
+        heap_begin->free = 1;
+
+        LIST_INSERT_HEAD(&mblock_list, heap_begin, mb_link);
+
+        printk("malloc_init end\n");
+
+}
+
+void *malloc(size_t size) {
+        size_t dis = ROUND(size, 8);
+        struct MBlock *iter = LIST_FIRST(&mblock_list);
+        for (; iter != NULL; iter = LIST_NEXT(iter, mb_link)) {
+                if (iter->size >= dis && iter->free == 1) {
+                        if (iter->size - dis < sizeof(struct MBlock) + 8) {
+                                iter->free = 0;
+                                return (void *)iter->data;
+                        } else {
+                                struct MBlock * p = (struct MBlock*) ((void*)iter->data + dis);
+                                p->size = iter->size - dis - sizeof(struct MBlock);
+                                p->free = 1;
+                                p->ptr = (void*) p->data;
+                                LIST_INSERT_AFTER(iter, p, mb_link);
+                                iter->size = dis;
+                                iter->free = 0;
+                                return (void*)iter->data;
+                        }
+                }
+        }
+        return NULL;
+}
+
+void free(void *p) {
+        /* Your Code Here (2/2) */
+        if (!(p >= HEAP_BEGIN + MBLOCK_SIZE && p <= HEAP_BEGIN + HEAP_SIZE)) {
+                return ;
+        }
+        struct MBlock* mbl = (struct MBlock*)(p - MBLOCK_SIZE);
+        if (mbl->ptr != mbl->data) {
+                return ;
+        }
+        if (mbl->free != 0) {
+                return ;
+ 	}
+        if (LIST_NEXT(mbl, mb_link) != NULL && LIST_NEXT(mbl, mb_link)->free == 1) {
+                mbl->size += MBLOCK_SIZE + LIST_NEXT(mbl, mb_link)->size;
+                LIST_REMOVE(LIST_NEXT(mbl, mb_link), mb_link);
+                mbl->free = 1;
+        } else if (MBLOCK_PREV(mbl, mb_link) != &mblock_list && ((MBLOCK_PREV(mbl, mb_link))->free) == 1) {
+                (MBLOCK_PREV(mbl, mb_link))->size += mbl->size + MBLOCK_SIZE;
+                LIST_REMOVE(mbl, mb_link);
+        } else {
+                mbl->free = 1;
+        }
+}
