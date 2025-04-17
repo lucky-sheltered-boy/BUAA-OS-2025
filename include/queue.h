@@ -118,7 +118,7 @@
 		LIST_NEXT((elm), field) = LIST_NEXT((listelm), field);				   \
 		(elm)->field.le_prev = &LIST_NEXT((listelm), field);				   \
 		LIST_NEXT((listelm), field) = (elm);						   \
-		if (LIST_NEXT((listelm), field) != NULL) {					   \
+		if (LIST_NEXT((elm), field) != NULL) {					   \
 			LIST_NEXT((elm), field)->field.le_prev = &LIST_NEXT((elm), field);	   \
 		}										   \
 	} while (0)
