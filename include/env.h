@@ -27,6 +27,12 @@ struct Env {
 	TAILQ_ENTRY(Env) env_sched_link; // intrusive entry in 'env_sched_list'
 	u_int env_pri;			 // schedule priority
 
+	LIST_ENTRY(Env) env_edf_sched_link; // 构造 env_edf_sched_list 的链表项
+	u_int env_edf_runtime; // EDF 调度参数：进程在每个周期内需要运行的时间片
+	u_int env_edf_period; // EDF 调度参数：进程的运行周期
+	u_int env_period_deadline; // 进程当前周期的截止时间
+	u_int env_runtime_left; // 进程当前周期剩余的时间片
+
 	// Lab 4 IPC
 	u_int env_ipc_value;   // the value sent to us
 	u_int env_ipc_from;    // envid of the sender
@@ -73,3 +79,8 @@ void envid2env_check(void);
 	})
 
 #endif // !_ENV_H_
+LIST_HEAD(Env_edf_sched_list, Env);
+
+extern struct Env_edf_sched_list env_edf_sched_list; // EDF 调度队列
+
+struct Env *env_create_edf(const void *binary, size_t size, int runtime, int period);

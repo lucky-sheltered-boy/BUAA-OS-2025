@@ -15,8 +15,41 @@
  *   3. You shouldn't use any 'return' statement because this function is 'noreturn'.
  */
 void schedule(int yield) {
+	static int clock = -1; // 当前时间片，从 0 开始计数
+	clock++;
+	static struct Env *last = NULL;
+	struct Env *env; // 循环变量
+
+	LIST_FOREACH (env, &env_edf_sched_list, env_edf_sched_link) {
+		// 在这里对 env 进行操作
+		if (clock == env->env_period_deadline) {
+			env->env_period_deadline += env->env_edf_period;
+			env->env_runtime_left = env->env_edf_runtime;
+		}	
+	}
+	
+	int env_id = -1;
+	int deadline = 100000000;
+	int flag = 0;
+	struct Env *des = NULL;
+	 LIST_FOREACH (env, &env_edf_sched_list, env_edf_sched_link) {
+		if (env->env_runtime_left <= 0) {
+			continue;
+		}
+		if (env->env_period_deadline < deadline || env->env_period_deadline == deadline && env->env_id < env_id) {
+			flag = 1;
+			deadline = env->env_period_deadline;
+			env_id = env->env_id;
+			des = env;
+		}
+	 }
+	if (flag == 1 && des != NULL) {
+		des->env_runtime_left--;
+		env_run(des);
+		return;
+	}
 	static int count = 0; // remaining time slices of current env
-	struct Env *e = curenv;
+	struct Env *e = last;
 
 	/* We always decrease the 'count' by 1.
 	 *
@@ -47,5 +80,7 @@ void schedule(int yield) {
 		count = e->env_pri;
 	}
 	count--;
+	last = e;
 	env_run(e);
 }
+
