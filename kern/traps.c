@@ -8,11 +8,15 @@ extern void handle_tlb(void);
 extern void handle_sys(void);
 extern void handle_mod(void);
 extern void handle_reserved(void);
+extern void handle_adel(void);
+extern void handle_ades(void);
 
 void (*exception_handlers[32])(void) = {
     [0 ... 31] = handle_reserved,
     [0] = handle_int,
     [2 ... 3] = handle_tlb,
+    [4] = handle_adel,
+    [5] = handle_ades,
 #if !defined(LAB) || LAB >= 4
     [1] = handle_mod,
     [8] = handle_sys,
