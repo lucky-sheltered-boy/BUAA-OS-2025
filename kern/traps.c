@@ -74,11 +74,32 @@ void do_ades(struct Trapframe *tf) {
         int fix = imm - offset;
 	Pte*pte = 0;
 	addr = (int *)(page2kva(page_lookup(curenv->env_pgdir, tf->cp0_epc, &pte)));
-addr = KADDR(PTE_ADDR(*pte)) | (tf->cp0_epc & 0xfff);	
+	addr = KADDR(PTE_ADDR(*pte)) | (tf->cp0_epc & 0xfff);	
 	
         *addr = *addr & 0xffff0000;
         *addr = *addr | (fix & 0x0000ffff);
 	printk("AdES handled, new imm is : %04x\n", *addr & 0xffff); // 这里的 new_inst 替换为修改后的指令
 }
 
+
 int * getkva(int* addr) {
+	struct Page* page = page_lookup(curenv->env_pgdir, addr, NULL);
+	return (int*)(page2kva(page));
+}
+
+int get_gpr(int* addr, struct Trapframe *tf) {
+	int cmd = *addr;
+	int base = (cmd >> 21);
+	base = base & 0x1f;
+	return tf->regs[base];
+}
+
+int get_imm(int* addr, struct Trapframe *tf) {
+	int cmd = *addr;
+	int imm = cmd & 0xffff;
+	if (((imm >> 15) & 1) == 0) {
+		return imm;
+	} else {
+		return (imm | 0xffff0000);
+	}
+}
