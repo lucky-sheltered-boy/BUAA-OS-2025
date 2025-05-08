@@ -65,6 +65,10 @@ int syscall_cgetc() {
 	return msyscall(SYS_cgetc);
 }
 
+int syscall_get_parent_envid(void) {
+	return msyscall(SYS_get_ppid);
+}
+
 int syscall_write_dev(void *va, u_int dev, u_int size) {
 	/* Exercise 5.2: Your code here. (1/2) */
 
