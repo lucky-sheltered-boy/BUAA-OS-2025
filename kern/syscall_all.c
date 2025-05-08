@@ -31,7 +31,8 @@ int sys_shm_new(u_int npage) {
 	
 	int j = 0;
 	for (j=0; j<npage; j++) {
-		try(page_alloc(&(shm_pool[i].pages[j])));
+		int r = page_alloc(&(shm_pool[i].pages[j]));
+		if (r == -E_NO_MEM) break;
 		shm_pool[i].pages[j]->pp_ref++;
 	}
 	if (j != npage) {
