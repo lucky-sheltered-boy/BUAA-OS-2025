@@ -15,6 +15,7 @@
 #define PTX(va) ((((u_long)(va)) >> PGSHIFT) & 0x03FF)
 #define PTE_ADDR(pte) (((u_long)(pte)) & ~0xFFF)
 #define PTE_FLAGS(pte) (((u_long)(pte)) & 0xFFF)
+#define PTE_PROTECT  0x0004
 
 // Page number field of an address
 #define PPN(pa) (((u_long)(pa)) >> PGSHIFT)
