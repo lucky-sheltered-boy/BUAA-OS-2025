@@ -137,3 +137,16 @@ int fsipc_remove(const char *path) {
 int fsipc_sync(void) {
 	return fsipc(FSREQ_SYNC, fsipcbuf, 0, 0);
 }
+
+int fsipc_find(const char *path, const char *name, struct Find_res *res) {
+	if (strlen(path) == 0 || strlen(path) > MAXPATHLEN) {
+	    	return -E_BAD_PATH;
+	}
+	struct Fsreq_find *req = (struct Fsreq_find *)fsipcbuf;
+	strcpy((char *)req->req_path, path);
+	strcpy((char *)req->req_name, name);
+
+	int r = fsipc(FSREQ_FIND, req, res, 0);
+	return r;
+}
+

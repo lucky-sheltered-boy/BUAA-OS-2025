@@ -825,3 +825,55 @@ int file_remove(char *path) {
 
 	return 0;
 }
+
+int find_files(const char *path, const char *name, struct Find_res *res) {
+        struct File *file;
+        // 用 walk_path 来找到 path 对应的文件夹
+        // Lab5-Exam: Your code here. (1/2)
+	walk_path(path, NULL, &file, NULL);
+
+        // 在 path 对应的文件夹下面遍历，找到所有名字为 name 的文件，你可以调用下面的参考函数 traverse_file
+        // Lab5-Exam: Your code here. (2/2)
+	traverse_file(path, file, name, res);
+}
+
+int traverse_file(const char *path, struct File *file, const char *name, struct Find_res *res) {
+
+	u_int nblock;
+	nblock = file->f_size / BLOCK_SIZE;
+
+	// 1. 检查路径长度是否符合要求，如不符合，直接返回
+	if (strlen(path) == 0 || strlen(path) > MAXPATHLEN) {
+		return -E_BAD_PATH;
+	}
+
+	// 2. 比较当前文件名是否等于 name，如果相等则更改 res
+	if (strcmp(file->f_name, name) == 0) {
+		/*增加 res->count*/
+		res->count += 1;
+		/*添加 res 的路径*/
+		strcpy(res->file_path[res->count - 1], path);
+	}
+	if (file->f_type == FTYPE_DIR) {
+		for (int i = 0; i < nblock; i++) {
+			void *blk;
+			try(file_get_block(file, i ,&blk));
+			struct File *files = (struct File *)blk;
+
+			for (struct File *f = files; f < files + FILE2BLK; ++f) {
+				char curpath[MAXPATHLEN + MAXNAMELEN + 1];
+				// 3. 把 path 和 name 拼接起来得到下一层文件路径，注意结尾的 '\0'
+				// 提示：我们没有实现 strcat 工具函数，你可以用 strcpy 实现拼接
+				strcpy(curpath, path);
+				char *p = curpath;
+				p = p + strlen(curpath);
+				strcpy(p, f->f_name);
+				p = p + strlen(p);
+				strcpy(p, "/");
+				// 4. 递归调用 traverse_file 函数
+				traverse_file(curpath, f, name, res);
+			}
+		}
+	}
+	return 0;
+}

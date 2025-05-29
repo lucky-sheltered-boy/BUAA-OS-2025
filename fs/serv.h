@@ -33,3 +33,4 @@ void fs_sync(void);
 extern uint32_t *bitmap;
 int map_block(u_int);
 int alloc_block(void);
+int find_files(const char *path, const char *name, struct Find_res *res);
