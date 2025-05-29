@@ -834,10 +834,10 @@ int find_files(const char *path, const char *name, struct Find_res *res) {
 
         // 在 path 对应的文件夹下面遍历，找到所有名字为 name 的文件，你可以调用下面的参考函数 traverse_file
         // Lab5-Exam: Your code here. (2/2)
-	traverse_file(path, file, name, res);
+	traverse_file(path, file, name, res, 0);
 }
 
-int traverse_file(const char *path, struct File *file, const char *name, struct Find_res *res) {
+int traverse_file(const char *path, struct File *file, const char *name, struct Find_res *res, int flag) {
 
 	u_int nblock;
 	nblock = file->f_size / BLOCK_SIZE;
@@ -866,12 +866,16 @@ int traverse_file(const char *path, struct File *file, const char *name, struct 
 				// 提示：我们没有实现 strcat 工具函数，你可以用 strcpy 实现拼接
 				strcpy(curpath, path);
 				char *p = curpath;
+ 				
 				p = p + strlen(curpath);
+				if (flag == 1) {
+					strcpy(p, "/");
+					p = p + 1;
+				}
 				strcpy(p, f->f_name);
-				p = p + strlen(p);
-				strcpy(p, "/");
+				
 				// 4. 递归调用 traverse_file 函数
-				traverse_file(curpath, f, name, res);
+				traverse_file(curpath, f, name, res, 1);
 			}
 		}
 	}
