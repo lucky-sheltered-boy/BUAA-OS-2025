@@ -834,6 +834,7 @@ int find_files(const char *path, const char *name, struct Find_res *res) {
 
         // 在 path 对应的文件夹下面遍历，找到所有名字为 name 的文件，你可以调用下面的参考函数 traverse_file
         // Lab5-Exam: Your code here. (2/2)
+	if (file != 0)
 	traverse_file(path, file, name, res, 0);
 }
 
