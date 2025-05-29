@@ -275,8 +275,6 @@ int fskey_set(int fdnum) {
   // 使用 fd_lookup 找到对应的 Fd 结构体。判断传入的文件描述符是否合
 	struct Fd *fd;
 	int r = fd_lookup(fdnum, &fd);
-	if (r != 0) return r;
-	if (fd->fd_omode != O_RDONLY) return -E_INVAL;
   // 如果不合法返回 fd_lookup 函数的返回值（该函数除了0之外，只会返回 -E_INVAL 错误码，符合系统行为要求）
 
   // 判断文件是否以加密方式打开，判断打开方式是否为只写
