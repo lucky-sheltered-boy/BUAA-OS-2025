@@ -219,6 +219,10 @@ void serve_map(u_int envid, struct Fsreq_map *rq) {
 		}
 	}
 	if ((r = file_get_block(pOpen->o_file, filebno, &blk)) < 0) {
+		char *blk2 = (char*)blk;
+		for (int i = 0; i < BLOCK_SIZE; i++) {
+ 	 		blk2[i] ^= encrypt_key[i];
+		}
 		if (flag) ipc_send(envid, r, 0, 0);
 		return;
 	}
@@ -281,6 +285,13 @@ void serve_close(u_int envid, struct Fsreq_close *rq) {
 			ipc_send(envid, -E_BAD_KEY, 0, 0);
 			flag = 0;
 		}
+	
+	}
+	struct Filefd *fd2 = pOpen->o_ff;
+	struct Fd*fd = (struct Fd*)fd2;
+	char *blk = fd2data(fd);
+	for (int i = 0; i < BLOCK_SIZE; i++) {
+ 		 blk[i] ^= encrypt_key[i];
 	}
 	if (flag) file_close(pOpen->o_file);
 	ipc_send(envid, 0, 0, 0);
