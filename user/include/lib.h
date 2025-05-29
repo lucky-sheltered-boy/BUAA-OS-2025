@@ -69,6 +69,16 @@ int syscall_cgetc(void);
 int syscall_write_dev(void *va, u_int dev, u_int len);
 int syscall_read_dev(void *va, u_int dev, u_int len);
 
+int fsipc_key_set(u_int fileid);
+int fsipc_key_unset();
+int fsipc_key_isset();
+
+int fskey_set(int fd);
+int fskey_unset();
+int fskey_isset();
+
+#define O_ENCRYPT 0x0010
+
 // ipc.c
 void ipc_send(u_int whom, u_int val, const void *srcva, u_int perm);
 u_int ipc_recv(u_int *whom, void *dstva, u_int *perm);

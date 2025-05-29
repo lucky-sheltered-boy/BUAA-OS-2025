@@ -58,7 +58,7 @@ int open(const char *path, int mode) {
 	// Step 4: Map the file content using 'fsipc_map'.
 	for (int i = 0; i < size; i += PTMAP) {
 		/* Exercise 5.9: Your code here. (4/5) */
-		r = fsipc_map(fileid, i, va + i);
+		try(r = fsipc_map(fileid, i, va + i));
 		if (r) {
 			return r;
 		}
@@ -270,3 +270,31 @@ int remove(const char *path) {
 int sync(void) {
 	return fsipc_sync();
 }
+
+int fskey_set(int fdnum) {
+  // 使用 fd_lookup 找到对应的 Fd 结构体。判断传入的文件描述符是否合
+	struct Fd *fd;
+	int r = fd_lookup(fdnum, &fd);
+	if (r != 0) return r;
+	if (fd->fd_omode != O_RDONLY) return -E_INVAL;
+  // 如果不合法返回 fd_lookup 函数的返回值（该函数除了0之外，只会返回 -E_INVAL 错误码，符合系统行为要求）
+
+  // 判断文件是否以加密方式打开，判断打开方式是否为只写
+  	
+  // 密钥文件要求以非加密且允许读的方式打开，不满足则返回 -E_INVAL
+
+  // 通过对 Fd 结构体进行处理获得 fileid ，合理调用相应文件系统 IPC 函数
+	struct Filefd *fd2 = (struct Filefd *) fd;
+	return fsipc_key_set(fd2->f_fileid);
+}
+
+int fskey_unset() {
+  // 合理调用相应文件系统 IPC 函数
+	return fsipc_key_unset();
+}
+
+int fskey_isset() {
+  // 合理调用相应文件系统 IPC 函数
+	return fsipc_key_isset();
+}
+

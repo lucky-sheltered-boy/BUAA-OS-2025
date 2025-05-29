@@ -44,6 +44,9 @@
 // File not a valid executable
 #define E_NOT_EXEC 13
 
+#define E_INVALID_KEY_FILE 14
+#define E_BAD_KEY 15
+
 /*
  * A quick wrapper around function calls to propagate errors.
  * Use this with caution, as it leaks resources we've acquired so far.

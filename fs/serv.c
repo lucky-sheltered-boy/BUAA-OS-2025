@@ -22,6 +22,8 @@ struct Open {
 	struct Filefd *o_ff;
 };
 
+static int encrypt_key_set = 0;
+static unsigned char encrypt_key[BLOCK_SIZE];
 /*
  * Max number of open files in the file system at once
  */
@@ -208,10 +210,16 @@ void serve_map(u_int envid, struct Fsreq_map *rq) {
 		return;
 	}
 
+	int flag = 1;
 	filebno = rq->req_offset / BLOCK_SIZE;
-
+	if (pOpen->o_mode == O_ENCRYPT) {
+		if (encrypt_key_set != 1) {
+			ipc_send(envid, -E_BAD_KEY, 0, 0);
+			flag = 0;
+		}
+	}
 	if ((r = file_get_block(pOpen->o_file, filebno, &blk)) < 0) {
-		ipc_send(envid, r, 0, 0);
+		if (flag) ipc_send(envid, r, 0, 0);
 		return;
 	}
 
@@ -267,8 +275,14 @@ void serve_close(u_int envid, struct Fsreq_close *rq) {
 		ipc_send(envid, r, 0, 0);
 		return;
 	}
-
-	file_close(pOpen->o_file);
+	int flag = 1;	
+	if (pOpen->o_mode == O_ENCRYPT) {
+		if (encrypt_key_set != 1) {
+			ipc_send(envid, -E_BAD_KEY, 0, 0);
+			flag = 0;
+		}
+	}
+	if (flag) file_close(pOpen->o_file);
 	ipc_send(envid, 0, 0, 0);
 }
 
@@ -340,10 +354,68 @@ void serve_sync(u_int envid) {
  * File system use this table and the request number to
  * call the corresponding serve function.
  */
+
+
+void serve_key_set(u_int envid, struct Fsreq_key_set *rq) {
+  // 判断当前状态是否已加载密钥，如果已加载密钥， IPC 返回 -E_BAD_KEY
+	if (encrypt_key_set == 1) {
+		ipc_send(envid, -E_BAD_KEY, 0, 0);
+	}
+
+  // 利用 open_lookup 找到对应的 Open 结构体，判断文件大小是否至少有两个磁盘块大小
+	struct Open *po;
+	int r = open_lookup(envid, rq->req_fileid, &po);
+	if (r != 0) ipc_send(envid, -E_INVALID_KEY_FILE,0,0);
+	if (po->o_file->f_size < 2 * 4096) ipc_send(envid, -E_INVALID_KEY_FILE, 0, 0);
+
+  // 利用 file_get_block 读取文件的第一个磁盘块，判断第一个字是否为 FS_MAGIC
+  	void *va = 0;
+	file_get_block(po->o_file, 0, &va);
+	if (*((uint32_t *)va) != FS_MAGIC) ipc_send(envid, -E_INVALID_KEY_FILE, 0, 0);
+
+  // 如果密钥文件不合法， IPC 返回 -E_INVALID_KEY_FILE
+
+  // 利用 file_get_block 读取文件的第二个磁盘块，将密钥复制到 encrypt_key 中
+	void *va2 = 0;
+	file_get_block(po->o_file, 1, &va2);
+	int i;
+	for (i = 0; i < BLOCK_SIZE; i++) {
+		encrypt_key[i] = *((char*)(va2 + i));
+	}
+
+  // 将当前状态标记为已加载密钥
+	encrypt_key_set = 1;
+
+  // IPC 返回 0
+	ipc_send(envid, 0, 0, 0);
+}
+
+void serve_key_unset(u_int envid) {
+  // 判断当前状态是否已加载密钥，如果未加载密钥， IPC 返回 -E_BAD_KEY
+	if (encrypt_key_set == 0) ipc_send(envid, -E_BAD_KEY, 0, 0);
+
+  // 将当前状态标记为未加载密钥
+	encrypt_key_set = 0;
+
+  // 将密钥缓存 encrypt_key 清零
+	int i;
+	for (i=0;i<BLOCK_SIZE;i++) {
+		encrypt_key[i] = 0;
+	}
+  // IPC 返回 0
+	ipc_send(envid, 0, 0, 0);
+}
+
+void serve_key_isset(u_int envid) {
+  // IPC 返回当前状态
+	ipc_send(envid, encrypt_key_set, 0, 0);
+}
+
 void *serve_table[MAX_FSREQNO] = {
     [FSREQ_OPEN] = serve_open,	 [FSREQ_MAP] = serve_map,     [FSREQ_SET_SIZE] = serve_set_size,
     [FSREQ_CLOSE] = serve_close, [FSREQ_DIRTY] = serve_dirty, [FSREQ_REMOVE] = serve_remove,
-    [FSREQ_SYNC] = serve_sync,
+    [FSREQ_SYNC] = serve_sync, [FSREQ_KEY_SET] = serve_key_set, [FSREQ_KEY_UNSET] = serve_key_unset, 
+    [FSREQ_KEY_ISSET] = serve_key_isset,
 };
 
 /*
