@@ -112,7 +112,9 @@ int spawn(char *prog, char **argv) {
 	// Return the error if 'open' fails.
 	int fd;
 	if ((fd = open(prog, O_RDONLY)) < 0) {
-		return fd;
+		if ((fd = open_add_b(prog, O_RDONLY)) < 0) {
+			return fd;
+		}
 	}
 
 	// Step 2: Read the ELF header (of type 'Elf32_Ehdr') from the file into 'elfbuf' using
@@ -232,4 +234,16 @@ int spawnl(char *prog, char *args, ...) {
 	// Thanks to MIPS calling convention, the layout of arguments on the stack
 	// are straightforward.
 	return spawn(prog, &args);
+}
+
+int open_add_b(char *prog, u_int omode) {
+	char filename[256] = {0};
+	int i;
+	for (i = 0; prog[i] != '\0'; i++) {
+		filename[i] = prog[i];
+	}
+	filename[i++] = '.';
+	filename[i++] = 'b';
+	filename[i] = '\0';
+	return open(filename, omode);
 }
