@@ -88,9 +88,8 @@ int pipe_is_closed(int fdnum);
 int pageref(void *);
 
 // fprintf.c
-int fprintf(int fd, const char *fmt, ...);
 int printf(const char *fmt, ...);
-
+int fprintf(int fd, const char *fmt, ...);
 // fsipc.c
 int fsipc_open(const char *, u_int, struct Fd *);
 int fsipc_map(u_int, u_int, void *);
