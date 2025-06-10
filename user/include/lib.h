@@ -132,6 +132,7 @@ int sync(void);
 #define O_ACCMODE 0x0003 /* mask for above modes */
 #define O_CREAT 0x0100	 /* create if nonexistent */
 #define O_TRUNC 0x0200	 /* truncate to zero length */
+#define O_APPEND 0x0010
 
 // Unimplemented open modes
 #define O_EXCL 0x0400  /* error if already exists */

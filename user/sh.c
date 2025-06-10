@@ -1,7 +1,7 @@
 #include <args.h>
 #include <lib.h>
 #include <fs.h>     // Added for O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND
-//#include <stdlib.h>
+//#include <stdlib.h> // Commented out to avoid exit conflict initially
 
 // --- Configuration ---
 #define MAX_INPUT_BUF 1024
@@ -82,38 +82,70 @@ struct ASTNode {
 };
 
 // --- Forward Declarations for Parser and Executor ---
-ASTNode *parse_list(void); // Forward declaration
-void readline(char *buf, u_int n, int interactive); // Forward declaration
+ASTNode *parse_list(void); 
+void readline(char *buf, u_int n, int interactive); 
+void free_ast_resources(void); // To reset static allocators
 
-// --- Placeholder for Malloc/Free ---
+// --- Static Allocators (Simple version for MOS) ---
+char strdup_pool[100][1000] = {0}; // Renamed for clarity
+int strdup_pool_index = 0;
 
-char strdup[100][1000] = {0};
-int strdup_index = 0;
+ASTNode astnode_pool[100] = {0}; // Reduced size for testing, adjust as needed
+int astnode_pool_index = 0;
+
+RedirNode redirnode_pool[100] = {0}; // Reduced size
+int redirnode_pool_index = 0;
+
+void reset_allocators() {
+    strdup_pool_index = 0;
+    astnode_pool_index = 0;
+    redirnode_pool_index = 0;
+    // Optionally, could also memset the pools to 0 if needed for strict hygiene,
+    // but for simple sequential use, just resetting indices is often enough.
+}
 
 char *user_strdup(const char *s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
-    if (strdup_index >= 100) {
-	user_panic("strdup out of number limit");
+    if (len > 1000) {
+        user_panic("strdup: string too long");
     }
-    char *new_s = strdup[strdup_index++];
-    if (new_s) {
-        memcpy(new_s, s, len);
-    } else {
-        debugf("user_strdup: user_malloc failed\n");
+    if (strdup_pool_index >= 100) {
+        user_panic("strdup_pool out of space");
     }
+    char *new_s = strdup_pool[strdup_pool_index++];
+    memcpy(new_s, s, len); // Use memcpy from lib.h
     return new_s;
+}
+
+ASTNode *alloc_ast_node(ASTNodeType type) {
+    if (astnode_pool_index >= 100) {
+        user_panic("astnode_pool out of space");
+    }
+    ASTNode *node = &astnode_pool[astnode_pool_index++];
+    memset(node, 0, sizeof(ASTNode)); // Clear the node
+    node->type = type;
+    return node;
+}
+
+RedirNode *alloc_redir_node() {
+    if (redirnode_pool_index >= 100) {
+        user_panic("redirnode_pool out of space");
+    }
+    RedirNode *node = &redirnode_pool[redirnode_pool_index++];
+    memset(node, 0, sizeof(RedirNode)); // Clear the node
+    return node;
 }
 
 
 // --- Tokenizer Globals ---
-static const char *current_pos; // Current position in the input string
+static const char *current_pos; 
 static Token current_token;
 static Token peeked_token;
 static int has_peeked_token;
 
 
-// --- Tokenizer Implementation ---
+// --- Tokenizer Implementation (No changes from previous version) ---
 void skip_whitespace_and_comments() {
     while (*current_pos) {
         if (strchr(" \t\r\n", *current_pos)) {
@@ -123,7 +155,7 @@ void skip_whitespace_and_comments() {
                 current_pos++;
             }
              if (*current_pos == '\n') {
-                 current_pos++; // Consume the newline as well
+                 current_pos++; 
              }
         } else {
             break;
@@ -185,23 +217,23 @@ Token get_next_raw_token() {
         int i = 0;
         while (*current_pos &&
                !strchr(" \t\r\n", *current_pos) &&
-               !strchr("|;&<>#", *current_pos) && // Include '#' here to stop word at comment
+               !strchr("|;&<>#", *current_pos) && 
                i < MAX_TOKEN_LEN - 1) {
-            // Check for multi-char ops that might start with a char also in SYMBOLS_SINGLE
              if (mystrncmp(current_pos, "&&", 2) == 0 || mystrncmp(current_pos, "||", 2) == 0 || mystrncmp(current_pos, ">>", 2) == 0) {
                 break;
             }
             token.value[i++] = *current_pos++;
         }
         token.value[i] = '\0';
-        if (i == 0) {
-             token.type = TOKEN_EOF; // Or error if not truly EOF
+        if (i == 0) { // Should only happen if initial current_pos was already pointing to a delimiter or EOF
+             if (*current_pos == '\0') token.type = TOKEN_EOF;
+             else token.type = TOKEN_ERROR; // Or some other non-word token was expected by caller
         }
     }
     return token;
 }
 
-void tokenizer_init(const char *input) { // Made input const
+void tokenizer_init(const char *input) { 
     current_pos = input;
     has_peeked_token = 0;
     current_token = get_next_raw_token();
@@ -209,7 +241,7 @@ void tokenizer_init(const char *input) { // Made input const
 
 Token consume_token() {
     Token old_current = current_token;
-    if (current_token.type == TOKEN_EOF) return old_current; // Do not advance past EOF
+    if (current_token.type == TOKEN_EOF) return old_current; 
 
     if (has_peeked_token) {
         current_token = peeked_token;
@@ -224,88 +256,49 @@ Token peek() {
     if (current_token.type == TOKEN_EOF) return current_token;
 
     if (!has_peeked_token) {
-        peeked_token = get_next_raw_token();
+        peeked_token = get_next_raw_token(); // This might advance current_pos if called alone
         has_peeked_token = 1;
     }
-    return peeked_token;
-}
-
-ASTNode astnode[1000];
-int astnode_index = 0;
-
-// --- AST Node Allocation ---
-ASTNode *alloc_ast_node(ASTNodeType type) {
-    if (astnode_index >= 1000) {
-	user_panic("astnode out of number limit");
-    }
-    ASTNode *node = &astnode[astnode_index++];
-    if (!node) {
-        user_panic("alloc_ast_node: out of memory");
-    }
-    memset(node, 0, sizeof(ASTNode));
-    node->type = type;
-    return node;
-}
-
-RedirNode redirnode[1000];
-int redirnode_index = 0;
-
-RedirNode *alloc_redir_node() {
-    if (redirnode_index >= 1000) {
-	user_panic("redirnode out of number limit");
-    }
-    RedirNode *node = &redirnode[redirnode_index++];
-    if (!node) {
-        user_panic("alloc_redir_node: out of memory");
-    }
-    memset(node, 0, sizeof(RedirNode));
-    return node;
+    return peeked_token; // Return the peeked one
 }
 
 
 // --- Parser (Recursive Descent) ---
-// Forward declarations for mutual recursion
 ASTNode *parse_and_or(void);
 ASTNode *parse_pipeline(void);
 ASTNode *parse_command(void);
 
-// line ::= list
 ASTNode *parse_line() {
+    // If the first token is EOF, it's an empty line effectively
+    if (current_token.type == TOKEN_EOF || current_token.type == TOKEN_EOL) {
+        return NULL;
+    }
     return parse_list();
 }
 
-// list ::= and_or ( ( ";" | "&" ) and_or )*
 ASTNode *parse_list() {
     ASTNode *node = parse_and_or();
-    // If parse_and_or returns NULL (e.g., empty input or error), node will be NULL.
-    // If it's an empty input, we should return NULL to signify no command.
-    if (!node && (current_token.type == TOKEN_EOF || current_token.type == TOKEN_EOL)) {
+    if (!node) { // Handles empty input or parse error from and_or
         return NULL;
     }
-    // If it was an error, node is NULL, and we might want to propagate that.
-    // For now, let's assume parse_and_or handles its own errors and returns NULL on error.
-    if (!node) return NULL;
-
 
     while (current_token.type == TOKEN_SEMI || current_token.type == TOKEN_AMP) {
         TokenType op_type = current_token.type;
-        consume_token(); 
+        consume_token();
 
-        // Handle cases like "cmd ;" or "cmd &" followed by EOL/EOF
-        if (current_token.type == TOKEN_EOF || current_token.type == TOKEN_EOL) {
+        if (current_token.type == TOKEN_EOF || current_token.type == TOKEN_EOL) { // Trailing ; or &
             ASTNode *new_list_node = alloc_ast_node(op_type == TOKEN_SEMI ? NODE_LIST_SEMI : NODE_LIST_AMP);
             new_list_node->data.binary_op.left = node;
-            new_list_node->data.binary_op.right = NULL; // No command on the right
+            new_list_node->data.binary_op.right = NULL;
             node = new_list_node;
-            break; // End of list
+            break; 
         }
 
         ASTNode *right_node = parse_and_or();
-        if (!right_node) { // Error in parsing right side or unexpected end
-             if(current_token.type != TOKEN_EOF && current_token.type != TOKEN_EOL) {
-                debugf("Syntax error after '%s'\n", op_type == TOKEN_SEMI ? ";" : "&");
-             }
-            return NULL;
+        if (!right_node) {
+            debugf("Syntax error after '%s'\n", op_type == TOKEN_SEMI ? ";" : "&");
+            // free_ast_resources(); // Not freeing partial tree, rely on main loop reset
+            return NULL; 
         }
 
         ASTNode *new_list_node = alloc_ast_node(op_type == TOKEN_SEMI ? NODE_LIST_SEMI : NODE_LIST_AMP);
@@ -316,17 +309,17 @@ ASTNode *parse_list() {
     return node;
 }
 
-// and_or ::= pipeline ( ( "&&" | "||" ) pipeline )*
 ASTNode *parse_and_or() {
     ASTNode *node = parse_pipeline();
     if (!node) return NULL;
 
     while (current_token.type == TOKEN_AND || current_token.type == TOKEN_OR) {
         TokenType op_type = current_token.type;
-        consume_token(); 
+        consume_token();
         ASTNode *right_node = parse_pipeline();
         if (!right_node) {
             debugf("Syntax error: '%s' not followed by pipeline\n", op_type == TOKEN_AND ? "&&" : "||");
+            // free_ast_resources();
             return NULL;
         }
         ASTNode *new_op_node = alloc_ast_node(op_type == TOKEN_AND ? NODE_AND : NODE_OR);
@@ -337,16 +330,16 @@ ASTNode *parse_and_or() {
     return node;
 }
 
-// pipeline ::= command ( "|" command )*
 ASTNode *parse_pipeline() {
     ASTNode *node = parse_command();
-    if (!node) return NULL; 
+    if (!node) return NULL;
 
     while (current_token.type == TOKEN_PIPE) {
-        consume_token(); 
+        consume_token();
         ASTNode *right_node = parse_command();
         if (!right_node) {
             debugf("Syntax error: '|' not followed by command\n");
+            // free_ast_resources();
             return NULL;
         }
         ASTNode *new_pipe_node = alloc_ast_node(NODE_PIPELINE);
@@ -357,76 +350,72 @@ ASTNode *parse_pipeline() {
     return node;
 }
 
-// command ::= WORD ( WORD | redirect )*
 ASTNode *parse_command() {
-     // A command must start with a WORD, or can be just redirections followed by a WORD,
-     // or just redirections. The EBNF implies WORD must come first if no redirections.
-     // Let's allow optional leading redirections before the first WORD.
-    int first_word_found = 0;
+    // Check if the current token can start a command (WORD or redirection)
+    if (current_token.type != TOKEN_WORD &&
+        current_token.type != TOKEN_REDIR_IN &&
+        current_token.type != TOKEN_REDIR_OUT &&
+        current_token.type != TOKEN_REDIR_APP) {
+        // If it's EOF or EOL, it's not a command.
+        if (current_token.type == TOKEN_EOF || current_token.type == TOKEN_EOL) return NULL;
+        // If it's another operator, it's a syntax error (e.g. "|| ls" or "| |")
+        // This should be caught by higher-level parsers.
+        // However, if parse_command is called directly and sees an operator, it's an error here.
+        // debugf("Syntax error: Expected command or redirection, got '%s'\n", current_token.value);
+        return NULL; // Indicates no command could be formed
+    }
+
     ASTNode *cmd_node_ast = alloc_ast_node(NODE_COMMAND);
     CMDNodeData *cmd_data = &cmd_node_ast->data.command;
-    cmd_data->argc = 0;
-    cmd_data->redirects = NULL;
+    // No memset here, alloc_ast_node does it.
     RedirNode **next_redir_ptr = &cmd_data->redirects;
 
-    while (1) {
+    // Collect all redirections and words
+    while (current_token.type == TOKEN_WORD ||
+           current_token.type == TOKEN_REDIR_IN ||
+           current_token.type == TOKEN_REDIR_OUT ||
+           current_token.type == TOKEN_REDIR_APP) {
+
         if (current_token.type == TOKEN_WORD) {
-            first_word_found = 1;
-            if (cmd_data->argc < MAX_CMD_ARGS -1) {
+            if (cmd_data->argc < MAX_CMD_ARGS - 1) {
                 cmd_data->argv[cmd_data->argc++] = user_strdup(current_token.value);
             } else {
                 debugf("Too many arguments for command\n");
-                return NULL;
+                // free_ast_resources(); // Rely on main loop reset
+                return NULL; // Error
             }
             consume_token();
-        } else if (current_token.type == TOKEN_REDIR_IN ||
-                   current_token.type == TOKEN_REDIR_OUT ||
-                   current_token.type == TOKEN_REDIR_APP) {
+        } else { // Redirection
             TokenType redir_op_type = current_token.type;
             consume_token(); 
 
             if (current_token.type != TOKEN_WORD) {
                 debugf("Syntax error: Redirection operator not followed by filename\n");
-                return NULL;
+                // free_ast_resources();
+                return NULL; // Error
             }
 
             RedirNode *redir_node = alloc_redir_node();
             if (redir_op_type == TOKEN_REDIR_IN) redir_node->type = REDIR_TYPE_IN;
             else if (redir_op_type == TOKEN_REDIR_OUT) redir_node->type = REDIR_TYPE_OUT;
             else if (redir_op_type == TOKEN_REDIR_APP) redir_node->type = REDIR_TYPE_APP;
-            else { user_panic("Unknown redir type");}
-
+            // No need for else panic, types are checked
 
             redir_node->filename = user_strdup(current_token.value);
             consume_token(); 
 
             *next_redir_ptr = redir_node;
             next_redir_ptr = &redir_node->next;
-        } else {
-            break; // Not a word or redirection, end of simple command
         }
     }
-    cmd_data->argv[cmd_data->argc] = NULL;
+    cmd_data->argv[cmd_data->argc] = NULL; 
 
+    // If nothing was parsed (no words, no redirects), it's not a valid command node.
     if (cmd_data->argc == 0 && cmd_data->redirects == NULL) {
-         return NULL; // No command parsed (e.g. empty input or just operators)
+        // alloc_ast_node makes a node, but it's empty. If we reset allocators, this is fine.
+        // No need to explicitly free here if allocators are reset per command line.
+        return NULL;
     }
-    // If only redirections but no command name, this is valid in some shells (e.g. `> file`)
-    // For MOS, spawn needs a command name.
-    if (cmd_data->argc == 0 && cmd_data->redirects != NULL) {
-        // Allow this for now, execute_ast will handle if it's runnable
-        // or we can choose to make it a syntax error if no command name.
-        // For simplicity, let's say a command name is required for execution.
-        // However, a command can consist of only redirections (e.g., '>out').
-        // The EBNF `command ::= WORD ( WORD | redirect )*` implies the first element of a command part
-        // must be a WORD unless the command *only* consists of redirections handled differently.
-        // Let's stick to the EBNF meaning for now that WORD is expected at the start of the "command" part.
-        // A pure redirection sequence is not what our `parse_command` aims to parse as a runnable command.
-        // This logic needs refinement if `>out` style commands are to be supported without a preceding WORD.
-        // For now, if `argc == 0`, `spawn` will fail.
-    }
-
-
     return cmd_node_ast;
 }
 
@@ -439,28 +428,22 @@ void execute_ast(ASTNode *node) {
 
     int child_pid;
     int pipe_fds[2];
+    // Unused variables removed
 
     switch (node->type) {
         case NODE_COMMAND: {
             CMDNodeData *cmd = &node->data.command;
-            if (cmd->argc == 0 && cmd->redirects == NULL) { // Should be caught by parser returning NULL
+            if (cmd->argc == 0 && cmd->redirects == NULL) {
                 return;
             }
-            // If only redirections, and no command, what to do?
-            // Standard shells might apply redirections to the shell itself or a null command.
-            // For us, `spawn` needs a command name.
-            if (cmd->argc == 0) {
-                // Apply redirections, but there's no command to run.
-                // This scenario needs careful thought. For now, do nothing if no command.
-                // Or, if we have redirections, fork a child that does nothing but apply them.
-                // debugf("Command node with no arguments to execute.\n");
-                // TODO: Handle redirections-only commands if necessary.
-                // For now, if argc is 0, spawn will fail.
+            if (cmd->argc == 0) { // Only redirections, no command name
+                // MOS spawn requires a command. POSIX shell might handle this differently.
+                // For now, if no command name, we can't spawn.
+                // We could fork and apply redirections, then exit, but that's for later.
+                debugf("sh: missing command for redirection\n");
                 return;
             }
 
-
-            // Fork for command execution to isolate redirections and environment.
             child_pid = fork();
             if (child_pid < 0) {
                 user_panic("execute_ast: fork for command failed");
@@ -474,32 +457,33 @@ void execute_ast(ASTNode *node) {
 
                     if (redir->type == REDIR_TYPE_IN) {
                         open_flags = O_RDONLY;
-                        target_fd_std = 0; // stdin
+                        target_fd_std = 0; 
                     } else if (redir->type == REDIR_TYPE_OUT) {
                         open_flags = O_WRONLY | O_CREAT | O_TRUNC;
-                        target_fd_std = 1; // stdout
+                        target_fd_std = 1; 
                     } else if (redir->type == REDIR_TYPE_APP) {
-                        open_flags = O_WRONLY | O_CREAT;
-                        target_fd_std = 1; // stdout
+                        // O_APPEND is assumed defined in fs.h now
+                        open_flags = O_WRONLY | O_CREAT | O_APPEND; 
+                        target_fd_std = 1; 
                     }
 
                     int opened_fd = open(redir->filename, open_flags);
                     if (opened_fd < 0) {
                         debugf("sh: cannot open %s\n", redir->filename);
-                        exit(); // Child exits on redirection error
+                        exit(); 
                     }
                     dup(opened_fd, target_fd_std);
                     close(opened_fd);
                     redir = redir->next;
                 }
 
-                int spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); // Cast for spawn
+                int spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); 
                 if (spawn_ret < 0) {
-                    debugf("sh: command not found or failed to spawn: %s (err %d)\n", cmd->argv[0], spawn_ret);
+                    debugf("sh: failed to spawn '%s' (err %d)\n", cmd->argv[0], spawn_ret);
                 }
-                exit(); // Child exits after spawn attempt
+                exit(); 
             } else { // Parent process
-                wait(child_pid); // Parent waits for the command child
+                wait(child_pid); 
             }
             break;
         }
@@ -512,7 +496,7 @@ void execute_ast(ASTNode *node) {
             int pid1 = fork();
             if (pid1 < 0) user_panic("fork for pipe left failed");
 
-            if (pid1 == 0) { // Child 1 (left side of pipe)
+            if (pid1 == 0) { 
                 close(pipe_fds[0]); 
                 dup(pipe_fds[1], 1);  
                 close(pipe_fds[1]); 
@@ -520,17 +504,20 @@ void execute_ast(ASTNode *node) {
                 exit(); 
             }
 
+            // Fork second child for the right side of the pipe
             int pid2 = fork();
-            if (pid2 < 0) user_panic("fork for pipe right failed");
-
-            if (pid2 == 0) { // Child 2 (right side of pipe)
-                close(pipe_fds[1]); 
-                dup(pipe_fds[0], 0);  
-                close(pipe_fds[0]); 
-                execute_ast(node->data.binary_op.right);
-                exit(); 
+            if (pid2 < 0) {
+                 user_panic("fork for pipe right failed");
             }
-
+            if (pid2 == 0) {
+                close(pipe_fds[1]);
+                dup(pipe_fds[0], 0);
+                close(pipe_fds[0]);
+                execute_ast(node->data.binary_op.right);
+                exit();
+            }
+            
+            // Parent closes both ends of the pipe
             close(pipe_fds[0]);
             close(pipe_fds[1]);
             wait(pid1);
@@ -549,28 +536,33 @@ void execute_ast(ASTNode *node) {
             child_pid = fork();
             if (child_pid < 0) user_panic("fork for & failed");
             if (child_pid == 0) {
-                // Child runs in background, no wait from immediate parent shell loop
                 execute_ast(node->data.binary_op.left);
                 exit();
             }
-            // Parent does not wait for node->data.binary_op.left
-            if (node->data.binary_op.right) { // If there's "cmd1 & cmd2"
+            // Parent does not wait
+            if (node->data.binary_op.right) { 
                 execute_ast(node->data.binary_op.right);
             }
             break;
 
-        case NODE_AND: // TODO: Needs proper exit status handling
-            debugf("Warning: && execution is simplified, currently acts like ;\n");
+        case NODE_AND: 
+            // TODO: Proper exit status handling needed
+            // For now, acts like semicolon
             execute_ast(node->data.binary_op.left);
-            // if (exit_status_of_left == 0)
-            execute_ast(node->data.binary_op.right);
+            // if (left_succeeded)
+            if (node->data.binary_op.right) { // Check if right node exists
+                 execute_ast(node->data.binary_op.right);
+            }
             break;
 
-        case NODE_OR: // TODO: Needs proper exit status handling
-            debugf("Warning: || execution is simplified, currently acts like ;\n");
+        case NODE_OR: 
+            // TODO: Proper exit status handling needed
+            // For now, acts like semicolon
             execute_ast(node->data.binary_op.left);
-            // if (exit_status_of_left != 0)
-            execute_ast(node->data.binary_op.right);
+            // if (left_failed)
+            if (node->data.binary_op.right) { // Check if right node exists
+                execute_ast(node->data.binary_op.right);
+            }
             break;
         
         default:
@@ -578,6 +570,67 @@ void execute_ast(ASTNode *node) {
     }
 }
 
+void readline(char *buf, u_int n, int interactive) {
+	int r;
+	u_int i = 0; 
+	char c;
+
+	for (i = 0; i < n - 1; /* i incremented inside or reset */ ) { // Leave space for null terminator
+		if ((r = read(0, &c, 1)) != 1) { // Read one character
+			if (r < 0 && interactive) { 
+				debugf("readline: read error: %d\n", r);
+			}
+			buf[i] = 0; 
+			// On EOF (Ctrl+D for interactive, or end of script) or error
+			if (interactive && r == 0) { 
+				// For interactive Ctrl+D, main loop will handle exit if buf is empty
+			} else if (!interactive && r <= 0) {
+				// For script EOF or error, main loop might also break, or shell exits here
+			}
+			// For MOS, exit() is from lib.h and usually takes no arguments.
+			// If we want to signal an error state for the shell, we might exit(1).
+			// For now, let readline return and let main decide based on buf[0].
+			// If it's a real error or script EOF, the shell should likely terminate.
+			if (r < 0 || (!interactive && r==0)) exit(); 
+			return; 
+		}
+
+		if (c == '\b' || c == 0x7f) { // Backspace or DEL
+			if (i > 0) {
+				// Terminal handles visual backspace. We just update our buffer.
+				i--; 
+			}
+            // else: i is 0, nothing to backspace in buffer
+		} else if (c == '\r' || c == '\n') {
+			if (interactive) {
+                // If terminal is in raw mode, we might need to print \r\n ourselves.
+                // Assuming canonical mode where terminal handles CR to CRLF or just LF.
+                // For simplicity, MOS shell often just prints \n.
+                printf("\n"); 
+            }
+			buf[i] = 0;
+			return;
+		} else {
+			// NO explicit echo: if (interactive) printf("%c", c);
+			buf[i] = c;
+            i++; // Increment index only for normal characters
+		}
+	}
+    // Buffer full
+	if (interactive) printf("\n"); 
+	debugf("readline: line too long\n");
+	buf[n-1] = 0; 
+	
+	char discard_char;
+	while ((r = read(0, &discard_char, 1)) == 1 && discard_char != '\r' && discard_char != '\n') {
+		; // Discard rest of the line
+	}
+    // If the line was too long and we discarded, and it ended with newline,
+    // ensure a newline is printed if interactive (already handled by buffer full case)
+    // if (interactive && (discard_char == '\r' || discard_char == '\n')) {
+    // printf("\n");
+    // }
+}
 
 
 // --- Main Shell Loop ---
@@ -585,13 +638,8 @@ char input_buf[MAX_INPUT_BUF];
 
 void usage(void) {
     printf("usage: sh [-ix] [script-file]\n");
-    exit(); // Exit with error status
+    exit(); 
 }
-
-// readline is defined in the original sh.c, assuming it's available.
-// If not, it needs to be copied or reimplemented.
-// For now, I'll copy its signature here for clarity.
-void readline(char *buf, u_int n, int interactive);
 
 
 int main(int argc, char **argv) {
@@ -616,35 +664,61 @@ int main(int argc, char **argv) {
     }
     ARGEND
 
-    if (argc > 1) {
-        usage(); 
+    if (argc > 1) { 
+        close(0);
+        int r_open = open(argv[0], O_RDONLY);
+        if (r_open < 0) {
+            user_panic("open %s: %d", argv[0], r_open);
+        }
+        if (r_open != 0) { 
+            dup(r_open, 0);
+            close(r_open);
+        }
+        interactive = 0; 
     }
+
 
     for (;;) {
         if (interactive) {
             printf("\n$ ");
         }
-
+        
+        reset_allocators(); 
+        memset(input_buf, 0, sizeof(input_buf)); 
         readline(input_buf, sizeof input_buf, interactive);
 
-        if (input_buf[0] == '\0' && current_pos == input_buf) { // Truly empty line after readline processing
-            continue;
+        // Check for EOF (Ctrl+D in interactive mode)
+        if (input_buf[0] == '\0') {
+            if (interactive) {
+                // This condition checks if readline returned an empty buffer,
+                // which can happen if read(0, &c, 1) returned 0 (EOF).
+                // A more robust way is if readline itself signals EOF.
+                int eof_check_r = read(0, &input_buf[0], 0); // Check fd 0 status
+                if (eof_check_r < 0) { // Assuming -E_EOF
+                     printf("exit\n");
+                     exit();
+                } else if (eof_check_r == 0) { // Typically means EOF on a regular file
+                     printf("exit\n");
+                     exit();
+                }
+                // If still empty after these checks, it might be just an empty line.
+            } else { // Non-interactive (script)
+                 // End of script
+                 exit();
+            }
         }
-         // Check for EOF from readline if it indicates it (e.g., by returning a specific value or string content)
-        // This simple readline doesn't explicitly return EOF for interactive sessions, Ctrl-D might map to 0.
 
 
-        if (echocmds && input_buf[0] != '\0') { // Don't echo empty lines if # was the only content
+        if (echocmds && input_buf[0] != '\0') {
             printf("# %s\n", input_buf);
         }
         
-        // Skip pure comment lines after echocmds
         const char* temp_scan = input_buf;
         while (*temp_scan && strchr(" \t\r\n", *temp_scan)) temp_scan++;
         if (*temp_scan == '#' || *temp_scan == '\0') {
-            continue;
+            if (input_buf[0] == '\0' && interactive) { /* Already handled EOF above */ }
+            else { continue; } // Skip comment or truly empty lines
         }
-
 
         tokenizer_init(input_buf);
         ASTNode *ast = parse_line();
@@ -652,95 +726,47 @@ int main(int argc, char **argv) {
         if (ast) {
             execute_ast(ast);
         } else {
-            // Error already printed by parser, or it was an empty/comment line handled above
-            // but if current_token is not EOF/EOL, it might be an unhandled syntax error start
-            if(current_token.type != TOKEN_EOF && current_token.type != TOKEN_EOL && current_token.type != TOKEN_ERROR){
-                 // This implies parser returned NULL for a non-empty, non-comment line without consuming all tokens,
-                 // which usually means a syntax error it couldn't recover from at a higher level.
-                 // debugf("sh: syntax error near token '%s'\n", current_token.value); // Parser should print specifics
+            if(current_token.type != TOKEN_EOF && current_token.type != TOKEN_EOL && current_token.type != TOKEN_ERROR && input_buf[0] != '\0'){
+                 debugf("sh: syntax error or no command entered near '%s'\n", current_token.value);
             }
         }
     }
-    return 0;
+    return 0; // Should not be reached in normal operation
 }
 
-
-// Copied readline from original sh.c for completeness, assuming it's needed here
-// and not in a separate user/lib/readline.c
-void readline(char *buf, u_int n, int interactive) {
-	int r;
-	int i; // Declare i outside for loop
-	for (i = 0; i < n; i++) { // Corrected loop condition to < n
-		if ((r = read(0, buf + i, 1)) != 1) {
-			if (r < 0) {
-				debugf("read error: %d\n", r);
-			}
-			// On read error or EOF for script, exit the shell
-			exit(); // Changed to exit with status
-		}
-		// Handle backspace
-        // buf[i] will be the char read.
-		if (buf[i] == '\b' || buf[i] == 0x7f) { // 0x7f is DEL
-			if (i > 0) {
-				printf("\b \b"); // Erase char on screen: back, space, back
-				i -= 2; // Current char is backspace, previous char to be removed.
-			} else {
-				i = -1; // Effectively restarts loop for this char, or handles empty buffer backspace
-			}
-		} else if (buf[i] == '\r' || buf[i] == '\n') {
-			buf[i] = 0; // Null terminate
-        		if (interactive) printf("\n"); // Echo newline only if interactive
-				return;
-		} else {
-            		if (interactive) printf("%c", buf[i]); // Echo character if interactive
-        	}
-	}
-    // Buffer full
-	debugf("line too long\n");
-	buf[n-1] = 0; // Ensure null termination if buffer full
-	// Discard rest of the line
-	char discard_char;
-	while ((r = read(0, &discard_char, 1)) == 1 && discard_char != '\r' && discard_char != '\n') {
-		;
-	}
-    if (interactive && (discard_char == '\r' || discard_char == '\n')) {
-        printf("\n");
-    }
-}
-
-
+// mystrncpy and mystrncmp remain unchanged from your provided version.
+// ... [mystrncpy and mystrncmp definitions] ...
 int mystrncpy(char* dest, const char* src, int count)
 {
-	char* start = dest; // 记录目标字符串起始位置
-	while (count && (*dest++ = *src++)) // 拷贝字符串
+	char* start = dest; 
+	while (count && (*dest++ = *src++)) 
 	{
 		count--;
 	}
-	if (count) // 当count大于src的长度时，将补充空字符
+	if (count) 
 	{
 		while (--count)
 		{
 			*dest++ = '\0';
 		}
 	}
-	return 0;
+	return 0; 
 }
 
 int mystrncmp(const char *s1, const char *s2, int n) {
     size_t i = 0;
 
-    while (i < n && s1[i] != '\0' && s2[i] != '\0') {
+    if (n < 0) return 0; 
+
+    while (i < (size_t)n && s1[i] != '\0' && s2[i] != '\0') {
         if (s1[i] != s2[i]) {
             return (unsigned char)s1[i] - (unsigned char)s2[i];
         }
         i++;
     }
 
-    if (i < n) {
-        if (s1[i] != s2[i]) {
+    if (i < (size_t)n) { 
             return (unsigned char)s1[i] - (unsigned char)s2[i];
-        }
     }
-
-    return 0;
+    return 0; 
 }
