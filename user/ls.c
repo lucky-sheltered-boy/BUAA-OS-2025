@@ -80,7 +80,9 @@ int main(int argc, char **argv) {
 	ARGEND
 
 	if (argc == 0) {
-		ls("/", "");
+		char cwd[1024] = {0};
+		syscall_get_cwd(cwd);
+		ls(cwd, "");
 	} else {
 		for (i = 0; i < argc; i++) {
 			ls(argv[i], argv[i]);

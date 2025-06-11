@@ -113,7 +113,18 @@ int spawn(char *prog, char **argv) {
 	int fd;
 	if ((fd = open(prog, O_RDONLY)) < 0) {
 		if ((fd = open_add_b(prog, O_RDONLY)) < 0) {
-			return fd;
+			char abs_path[1024] = {0};
+			char *p = abs_path;
+			*p++ = '/';
+			char *prog1 = prog;
+			while ((*p++ = *prog1++) != '\0') { }
+			p--;
+			*p++ = '.';
+			*p++ = 'b';
+			*p = '\0';
+			printf("command not found, using: %s\n", abs_path);
+			if ((fd = open(abs_path, O_RDONLY)) < 0) 
+				return fd;
 		}
 	}
 
