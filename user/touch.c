@@ -8,9 +8,9 @@ void touch(char *path) {
     }
     fd = open(path, O_CREAT);
     if (fd == -10) {
-        user_panic("touch: cannot touch '%s': No such file or directory\n", path);
+        printf("touch: cannot touch '%s': No such file or directory\n", path);
     } else if (fd < 0) {
-        user_panic("other error when touch %s, error code is %d\n", path, fd);
+        printf("other error when touch %s, error code is %d\n", path, fd);
     } else {
         close(fd);
     }
@@ -19,7 +19,7 @@ void touch(char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        user_panic("nothing to touch\n");
+        printf("nothing to touch\n");
     } else {
         for (int i = 1; i < argc; ++i) {
             touch(argv[i]);

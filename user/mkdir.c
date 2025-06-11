@@ -29,7 +29,7 @@ void mkdir(char *path) {
                 if (fd >= 0) {
                     close(fd);
                 } else {
-                    user_panic("other error when mkdir %s, error code is %d\n", path, fd);
+                    printf("other error when mkdir %s, error code is %d\n", path, fd);
                 }
             }
             str[i] = path[i];
@@ -39,19 +39,19 @@ void mkdir(char *path) {
         if (fd >= 0) {
             close(fd);
         } else {
-            user_panic("other error when mkdir %s, error code is %d\n", path, fd);
+            printf("other error when mkdir %s, error code is %d\n", path, fd);
         }
     } else {
         if ((fd = open(path, O_RDONLY)) >= 0) {
             close(fd);
-            user_panic("mkdir: cannot create directory '%s': File exists\n", path);
+            printf("mkdir: cannot create directory '%s': File exists\n", path);
             return;
         }
         fd = open(path, O_MKDIR);
         if (fd == -10) {
-            user_panic("mkdir: cannot create directory '%s': No such file or directory\n", path);
+            printf("mkdir: cannot create directory '%s': No such file or directory\n", path);
         } else if (fd < 0) {
-            user_panic("other error when mkdir %s, error code is %d\n", path, fd);
+            printf("other error when mkdir %s, error code is %d\n", path, fd);
         } else {
             close(fd);
         }
@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     }    
 
     if (argc < 2) {
-        user_panic("nothing to mkdir\n");
+        printf("nothing to mkdir\n");
     } else {
         for (int i = 1; i < argc; ++i) {
             if (argv[i] == 0) {

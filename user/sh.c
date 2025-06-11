@@ -401,7 +401,8 @@ ASTNode *parse_command() {
 
 int is_inner_cmd(CMDNodeData *cmd) {
 	if (mystrcmp(cmd->argv[0], "cd") == 0 || 
-	    mystrcmp(cmd->argv[0], "pwd") == 0) {
+	    mystrcmp(cmd->argv[0], "pwd") == 0 ||
+	    mystrcmp(cmd->argv[0], "exit") == 0) {
 		return 1;
 	} else {
 		return 0;
@@ -426,7 +427,7 @@ void execute_inner_cmd(CMDNodeData *cmd) {
 			syscall_get_cwd(cwd);
 			int r;
 			if ((r = get_final_path(cwd, cmd->argv[1], finalpath)) == 0) {
-				printf("absolute path: %s\n", finalpath);
+				//printf("absolute path: %s\n", finalpath);
 				syscall_set_cwd(finalpath);
 			} else {
 				if (r == 1) {
@@ -444,6 +445,8 @@ void execute_inner_cmd(CMDNodeData *cmd) {
 		} else if (cmd->argc > 2) {
 			printf("Too many args for cd command\n");
 		}
+	} else if (mystrcmp(cmd->argv[0], "exit") == 0) {
+		exit();
 	}
 }
 
@@ -464,7 +467,7 @@ int get_final_path(const char *cwd, const char *path, char *finalpath) {
         // As per your spec: "绝对路径，此时将这个绝对路径复制到第三个参数finalpath即可，返回0"
         // This means no stat check for absolute paths here.
         // Normalization is still good practice.
-	printf("rel is abs, raw finalpath: %s\n", constructed_path);
+	//printf("rel is abs, raw finalpath: %s\n", constructed_path);
     } else { // Relative path
         // Construct full path: cwd + "/" + path
         if (mystrlen(cwd) + 1 + mystrlen(path) + 1 > sizeof(constructed_path)) { // +1 for potential slash, +1 for null
@@ -481,7 +484,7 @@ int get_final_path(const char *cwd, const char *path, char *finalpath) {
             // More simply, if cwd is "/", just don't add another slash if path is not empty.
         }
         mystrcat(constructed_path, path);
-	printf("rel is rel, raw finalpath: %s\n", constructed_path);
+	//printf("rel is rel, raw finalpath: %s\n", constructed_path);
         // Normalize the constructed path (handles ".", "..", "//")
     }
         if (normalize_path(constructed_path) < 0) {
