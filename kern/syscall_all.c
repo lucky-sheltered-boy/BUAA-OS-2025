@@ -5,6 +5,7 @@
 #include <printk.h>
 #include <sched.h>
 #include <syscall.h>
+#include <string.h>
 
 extern struct Env *curenv;
 
@@ -265,7 +266,7 @@ int sys_exofork(void) {
 	/* Exercise 4.9: Your code here. (4/4) */
 	e->env_status = ENV_NOT_RUNNABLE;
 	e->env_pri = curenv->env_pri;
-
+	strcpy(e->env_cwd, curenv->env_cwd);	
 	return e->env_id;
 }
 
@@ -553,6 +554,14 @@ int sys_read_dev(u_int va, u_int pa, u_int len) {
 	return 0;
 }
 
+void sys_get_cwd(char *buf) {
+	strcpy(buf, curenv->env_cwd);
+}
+
+void sys_set_cwd(char *newcwd) {
+	strcpy(curenv->env_cwd, newcwd);
+}
+
 void *syscall_table[MAX_SYSNO] = {
     [SYS_putchar] = sys_putchar,
     [SYS_print_cons] = sys_print_cons,
@@ -572,6 +581,8 @@ void *syscall_table[MAX_SYSNO] = {
     [SYS_cgetc] = sys_cgetc,
     [SYS_write_dev] = sys_write_dev,
     [SYS_read_dev] = sys_read_dev,
+    [SYS_get_cwd] = sys_get_cwd,
+    [SYS_set_cwd] = sys_set_cwd,
 };
 
 /* Overview:

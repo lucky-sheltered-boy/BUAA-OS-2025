@@ -152,6 +152,12 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 		return;
 	}
 
+	if ((rq->req_omode & O_MKDIR) && (r = file_create(rq->req_path, &f)) < 0 &&
+		r != -E_FILE_EXISTS) {
+		ipc_send(envid, r, 0, 0);
+		return;
+	}
+
 	if ((rq->req_omode & O_CREAT) && (r = file_create(rq->req_path, &f)) < 0 &&
 	    r != -E_FILE_EXISTS) {
 		ipc_send(envid, r, 0, 0);
@@ -162,6 +168,10 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 	if ((r = file_open(rq->req_path, &f)) < 0) {
 		ipc_send(envid, r, 0, 0);
 		return;
+	}
+
+	if (rq->req_omode & O_MKDIR) {
+		f->f_type = FTYPE_DIR;
 	}
 
 	// Save the file pointer.
@@ -181,6 +191,10 @@ void serve_open(u_int envid, struct Fsreq_open *rq) {
 	o->o_mode = rq->req_omode;
 	ff->f_fd.fd_omode = o->o_mode;
 	ff->f_fd.fd_dev_id = devfile.dev_id;
+	if (rq->req_omode & O_APPEND) {
+		ff->f_fd.fd_offset = ff->f_file.f_size;
+		// debugf("offset: %d\n", ff->f_fd.fd_offset);
+	}
 	ipc_send(envid, 0, o->o_ff, PTE_D | PTE_LIBRARY);
 }
 
