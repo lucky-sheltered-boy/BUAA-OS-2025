@@ -3,4 +3,6 @@ INITAPPS +=
 
 USERLIB	+=
 
-USERAPPS +=
+USERAPPS += touch.b \
+	    mkdir.b \
+	    rm.b
