@@ -7,6 +7,32 @@
 #define MAX_INPUT_BUF 1024
 #define MAX_TOKEN_LEN 1024
 #define MAX_CMD_ARGS 128
+#define MAX_VAR_NAME_LEN 16
+#define MAX_VAR_VALUE_LEN 16
+#define MAX_SHELL_VARS 128 // Arbitrary limit
+#define MAX_EXPANDED_STR_LEN (MAX_TOKEN_LEN * 2) // Or some reasonable upper bound
+
+char expansion_buffer_pool[100][MAX_EXPANDED_STR_LEN]; // Pool for expanded strings
+int expansion_buffer_pool_index = 0;
+char* expand_string_variables(char *input_str);
+
+typedef struct {
+    char name[MAX_VAR_NAME_LEN + 1];
+    char value[MAX_VAR_VALUE_LEN + 1];
+    int is_exported; // 0 for local, 1 for environment
+    int is_readonly; // 0 for writable, 1 for read-only
+    int is_set;      // 0 if slot is free or unset, 1 if set (even if value is empty)
+} ShellVar;
+
+static ShellVar shell_vars[MAX_SHELL_VARS];
+static int num_set_vars = 0; // Optional: to quickly check if full or for find_free_slot
+
+void init_shell_vars(void);
+ShellVar* find_variable(const char *name);
+int set_variable(const char *name, const char *value, int export_flag, int readonly_flag, int update_flags_if_exists);
+int unset_variable(const char *name);
+void print_all_variables(void);
+char* get_variable_value(const char *name); // For expansion
 
 // --- Forward Declarations for AST node types ---
 typedef struct ASTNode ASTNode;
@@ -100,6 +126,7 @@ void reset_allocators() {
     strdup_pool_index = 0;
     astnode_pool_index = 0;
     redirnode_pool_index = 0;
+    expansion_buffer_pool_index = 0;
 }
 
 char *user_strdup(const char *s) {
@@ -360,7 +387,9 @@ ASTNode *parse_command() {
     while (1) { // Changed to infinite loop, break out explicitly
         if (current_token.type == TOKEN_WORD) {
             if (cmd_data->argc < MAX_CMD_ARGS - 1) {
-                cmd_data->argv[cmd_data->argc++] = user_strdup(current_token.value);
+		     // Expand variables in the token's value
+                char *expanded_arg = expand_string_variables(current_token.value);
+                cmd_data->argv[cmd_data->argc++] = expanded_arg; // user_strdup is now done by expand_string_variables
             } else {
                 debugf("Too many arguments for command\n");
                 return NULL; 
@@ -380,10 +409,12 @@ ASTNode *parse_command() {
             RedirNode *redir_node = alloc_redir_node();
             if (redir_op_type == TOKEN_REDIR_IN) redir_node->type = REDIR_TYPE_IN;
             else if (redir_op_type == TOKEN_REDIR_OUT) redir_node->type = REDIR_TYPE_OUT;
-            else if (redir_op_type == TOKEN_REDIR_APP) redir_node->type = REDIR_TYPE_APP;
+	    else if (redir_op_type == TOKEN_REDIR_APP) redir_node->type = REDIR_TYPE_APP;
+	     // Expand variables in the filename
+            char *expanded_filename = expand_string_variables(current_token.value);
+            redir_node->filename = expanded_filename; // user_strdup is now done by expand_string_variables
+            consume_token();
 
-            redir_node->filename = user_strdup(current_token.value);
-            consume_token(); 
 
             *next_redir_ptr = redir_node;
             next_redir_ptr = &redir_node->next;
@@ -399,10 +430,85 @@ ASTNode *parse_command() {
     return cmd_node_ast;
 }
 
+void reset_expansion_buffer_pool() {
+    expansion_buffer_pool_index = 0;
+}
+
+char *get_expansion_buffer() {
+    if (expansion_buffer_pool_index >= 100) {
+        user_panic("expansion_buffer_pool out of space");
+    }
+    return expansion_buffer_pool[expansion_buffer_pool_index++];
+}
+
+char * expand_string_variables( char *input_str) {
+    if (!input_str || !strchr(input_str, '$')) { // Quick check: if no '$', return original (or a copy)
+        return user_strdup(input_str); // Return a copy from strdup_pool
+    }
+
+    char *output_buf = get_expansion_buffer(); // Get a buffer from the expansion pool
+    output_buf[0] = '\0'; // Start with an empty string
+    char *out_ptr = output_buf;
+    const char *in_ptr = input_str;
+
+    while (*in_ptr) {
+        if (*in_ptr == '$') {
+            in_ptr++; // Skip the '$'
+            char var_name[MAX_VAR_NAME_LEN + 1];
+            int i = 0;
+            // Variable names: alphanumeric and underscore, first char not a digit (C-like)
+            // For simplicity, let's allow any char until a non-var char or MAX_VAR_NAME_LEN
+            // Bash rules are more complex (e.g. ${var}, $?, $#)
+            // For MOS, assume simple $VARNAME.
+            while (*in_ptr &&
+                   i < MAX_VAR_NAME_LEN &&
+                   // Define what constitutes a valid variable name character.
+                   // For simplicity: not whitespace, not another '$', not operators like '|', ';', '<', '>', '&'
+                   // and not path separators like '/'.
+                   !strchr(" \t\r\n$|;&<>/", *in_ptr)
+                   ) {
+                var_name[i++] = *in_ptr++;
+            }
+            var_name[i] = '\0';
+
+            if (i > 0) { // A variable name was actually parsed
+                const char *var_value = get_variable_value(var_name);
+                if (var_value) {
+                    size_t val_len = mystrlen(var_value);
+                    if ((out_ptr - output_buf) + val_len < MAX_EXPANDED_STR_LEN) {
+                        mystrcpy(out_ptr, var_value);
+                        out_ptr += val_len;
+                    } else { /* Buffer overflow for expanded string, handle error or truncate */ }
+                }
+                // If var_value is NULL (not found), it expands to nothing (empty string),
+                // so we just don't append anything.
+            } else {
+                // Case: just '$' or '$' followed by a delimiter immediately. Treat '$' literally.
+                if ((out_ptr - output_buf) < MAX_EXPANDED_STR_LEN -1) {
+                    *out_ptr++ = '$';
+                     // If in_ptr didn't move (e.g. '$' at end of string, or '$$'),
+                     // we need to ensure we don't get stuck in a loop if in_ptr pointed to the char after '$'
+                     // The outer loop's *in_ptr check and increment will handle moving past the delimiter or end.
+                }
+            }
+        } else {
+            if ((out_ptr - output_buf) < MAX_EXPANDED_STR_LEN - 1) {
+                *out_ptr++ = *in_ptr++;
+            } else {
+                in_ptr++; // Skip char if buffer is full, or break
+            }
+        }
+    }
+    *out_ptr = '\0';
+    return output_buf;
+}
+
 int is_inner_cmd(CMDNodeData *cmd) {
 	if (mystrcmp(cmd->argv[0], "cd") == 0 || 
 	    mystrcmp(cmd->argv[0], "pwd") == 0 ||
-	    mystrcmp(cmd->argv[0], "exit") == 0) {
+	    mystrcmp(cmd->argv[0], "exit") == 0 ||
+	    mystrcmp(cmd->argv[0], "declare") == 0 ||
+	    mystrcmp(cmd->argv[0], "unset") == 0 ) {
 		return 1;
 	} else {
 		return 0;
@@ -447,7 +553,64 @@ void execute_inner_cmd(CMDNodeData *cmd) {
 		}
 	} else if (mystrcmp(cmd->argv[0], "exit") == 0) {
 		exit();
-	}
+	} else if (mystrcmp(cmd->argv[0], "declare") == 0) {
+		int export_f = 0;
+       		int readonly_f = 0;
+        	int arg_idx = 1;
+        	char *name_val_pair = NULL;
+
+        	// Parse flags
+        	while (cmd->argv[arg_idx] && cmd->argv[arg_idx][0] == '-') {
+            		if (mystrcmp(cmd->argv[arg_idx], "-x") == 0) export_f = 1;
+            		else if (mystrcmp(cmd->argv[arg_idx], "-r") == 0) readonly_f = 1;
+			else if (mystrcmp(cmd->argv[arg_idx], "-xr") == 0 ||
+				 mystrcmp(cmd->argv[arg_idx], "-rx") == 0) {
+				export_f = 1;
+				readonly_f = 1;
+			}
+            		else {
+                		printf("declare: invalid option %s\n", cmd->argv[arg_idx]);
+                		return; // Indicate error if builtins had return values
+            		}
+            		arg_idx++;
+        	}
+
+        	if (cmd->argv[arg_idx]) { // NAME[=VALUE] part
+            		name_val_pair = cmd->argv[arg_idx];
+        	}
+
+        	if (!name_val_pair) { // Just "declare" or "declare -xr"
+            		print_all_variables();
+        	} else {
+            		char name[MAX_VAR_NAME_LEN + 1];
+            		char value_buf[MAX_VAR_VALUE_LEN + 1]; // Buffer for value if parsed
+            		char *value_ptr = NULL;
+
+            		char *eq_ptr = strchr(name_val_pair, '=');
+            		if (eq_ptr) { // NAME=VALUE
+                		int name_len = eq_ptr - name_val_pair;
+                		if (name_len > MAX_VAR_NAME_LEN) { /* error */ return; }
+                		mystrncpy(name, name_val_pair, name_len);
+                		name[name_len] = '\0';
+                		value_ptr = eq_ptr + 1; // Can be empty string
+                		if (mystrlen(value_ptr) > MAX_VAR_VALUE_LEN) { /* error */ return; }
+                		mystrcpy(value_buf, value_ptr);
+                		value_ptr = value_buf;
+
+            		} else { // Just NAME
+                		if (mystrlen(name_val_pair) > MAX_VAR_NAME_LEN) { /* error */ return; }
+                			mystrcpy(name, name_val_pair);
+                			value_ptr = ""; // Default to empty string
+            		}
+            		set_variable(name, value_ptr, export_f, readonly_f, 1);
+        	}
+	} else if (mystrcmp(cmd->argv[0], "unset") == 0) {
+        	if (cmd->argc != 2) {
+            		printf("unset: usage: unset NAME\n");
+            		return;
+        	}
+        	unset_variable(cmd->argv[1]);
+    	}
 }
 
 int get_final_path(const char *cwd, const char *path, char *finalpath) {
@@ -618,6 +781,7 @@ void execute_ast(ASTNode *node) {
 	    	execute_inner_cmd(cmd);
 		break;
 	    }
+
             child_pid = fork();
             if (child_pid < 0) {
                 user_panic("execute_ast: fork for command failed");
@@ -649,8 +813,44 @@ void execute_ast(ASTNode *node) {
                     close(opened_fd);
                     redir = redir->next;
                 }
+		int spawn_ret;
+		if (mystrcmp(cmd->argv[0], "sh.b") == 0 ||
+		    mystrcmp(cmd->argv[0], "sh") == 0 ||
+		    mystrcmp(cmd->argv[0], "/sh.b") == 0 ||
+		    mystrcmp(cmd->argv[0], "/sh") == 0) {
+            char *spawn_argv[MAX_CMD_ARGS + MAX_SHELL_VARS + 1]; // Max possible size
+            int spawn_argc = 0;
+            // 1. Copy command and its arguments
+            for (int i = 0; i < cmd->argc; ++i) {
+                spawn_argv[spawn_argc++] = cmd->argv[i];
+            }
+            // 2. Append exported environment variables
+            char env_str_pool[MAX_SHELL_VARS][MAX_VAR_NAME_LEN + MAX_VAR_VALUE_LEN + 2]; // Pool for "NAME=VALUE" strings
+            int env_str_idx = 0;
 
-                int spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); 
+            for (int i = 0; i < MAX_SHELL_VARS; ++i) {
+                if (shell_vars[i].is_set && shell_vars[i].is_exported) {
+                    if (spawn_argc < (MAX_CMD_ARGS + MAX_SHELL_VARS) && env_str_idx < MAX_SHELL_VARS) {
+                        char *current_env_str = env_str_pool[env_str_idx++];
+			if (shell_vars[i].is_readonly) {mystrcat(current_env_str, "1");	}
+			else {mystrcat(current_env_str, "0");}
+			mystrcat(current_env_str, shell_vars[i].name);
+			mystrcat(current_env_str, "=");
+			mystrcat(current_env_str, shell_vars[i].value);
+                        spawn_argv[spawn_argc++] = current_env_str;
+                    } else { /* too many args or env vars, handle error */ break; }
+                }
+            }
+            spawn_argv[spawn_argc] = NULL; // Null-terminate argv for spawn
+			//printf("create a child shell\n");
+			int i;
+			for (i = 0; i < spawn_argc; i++) {
+				//printf("%s\n", spawn_argv[i]);
+			}
+			spawn_ret = spawn(cmd->argv[0], spawn_argv);
+		} else {
+               		spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); 
+		}
                 if (spawn_ret < 0) {
                     // Error message printed by spawn or child itself if command not found by spawn
                     printf("sh: failed to spawn '%s' (err %d)\n", cmd->argv[0], spawn_ret);
@@ -797,8 +997,10 @@ void usage(void) {
 
 
 int main(int argc, char **argv) {
+    init_shell_vars();
     int interactive = iscons(0);
     int echocmds = 0; 
+    int initial_arg_idx = 0; // For parsing ARGBEGIN
 
     printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
     printf("::                                                         ::\n");
@@ -818,9 +1020,46 @@ int main(int argc, char **argv) {
     }
     ARGEND
 
-    if (argc > 1) { 
+    initial_arg_idx = 0; // Update based on how many options ARGBEGIN consumed
+
+    // Import environment variables passed from parent shell (if any)
+    // These are after shell options and before a script file argument
+    for (int i = initial_arg_idx; i < argc; ++i) {
+        char *arg = argv[i];
+        char *eq_ptr = strchr(arg, '=');
+	//printf("child shell receive: %s\n", argv[i]);
+        if (eq_ptr && (eq_ptr != arg)) { // Has '=' and it's not the first char
+            // This is likely an environment variable from parent
+            // The next argument would be the script file, if present.
+            // This logic needs to be robust if a script file can also have '=' in its name.
+            // For now, assume "NAME=VAL" before script file are env vars.
+            
+            char name[MAX_VAR_NAME_LEN + 1];
+            char value_buf[MAX_VAR_VALUE_LEN + 1];
+	    int is_readonly = 0;
+	    is_readonly = arg[0] == '1' ? 1 : 0;
+	    arg++;
+            int name_len = eq_ptr - arg;
+            if (name_len <= MAX_VAR_NAME_LEN) {
+                mystrncpy(name, arg, name_len);
+                name[name_len] = '\0';
+		//printf("add declaration: %s\n", name);
+                if (mystrlen(eq_ptr + 1) <= MAX_VAR_VALUE_LEN) {
+                    mystrcpy(value_buf, eq_ptr + 1);
+                    // Imported vars are exported, not readonly by default.
+                    set_variable(name, value_buf, 1, is_readonly, 0); // update_flags_if_exists = 0 (new var)
+                }
+            }
+            initial_arg_idx++; // Consumed this argument
+        } else {
+            // This must be the script file argument
+            break;
+        }
+    }
+
+    if (argc > initial_arg_idx) { 
         close(0);
-        int r_open = open(argv[0], O_RDONLY);
+        int r_open = open(argv[initial_arg_idx], O_RDONLY);
         if (r_open < 0) {
             user_panic("open %s: %d", argv[0], r_open);
         }
@@ -974,3 +1213,126 @@ int mystrlen(const char *str) {
     }
     return length;
 }
+
+void init_shell_vars() {
+    for (int i = 0; i < MAX_SHELL_VARS; ++i) {
+        shell_vars[i].is_set = 0;
+        shell_vars[i].name[0] = '\0';
+        shell_vars[i].value[0] = '\0';
+        shell_vars[i].is_exported = 0;
+        shell_vars[i].is_readonly = 0;
+    }
+    num_set_vars = 0;
+}
+
+ShellVar* find_variable(const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < MAX_SHELL_VARS; ++i) {
+        if (shell_vars[i].is_set && mystrcmp(shell_vars[i].name, name) == 0) {
+            return &shell_vars[i];
+        }
+    }
+    return NULL;
+}
+
+ShellVar* find_free_slot() {
+    for (int i = 0; i < MAX_SHELL_VARS; ++i) {
+        if (!shell_vars[i].is_set) {
+            return &shell_vars[i];
+        }
+    }
+    return NULL; // No free slot
+}
+
+int set_variable(const char *name, const char *value, int export_flag, int readonly_flag, int update_flags_if_exists) {
+    if (mystrlen(name) > MAX_VAR_NAME_LEN) {
+        //printf("sh: variable name too long: %s\n", name);
+        return -1;
+    }
+    if (value && mystrlen(value) > MAX_VAR_VALUE_LEN) {
+        //printf("sh: variable value too long for %s\n", name);
+        return -1;
+    }
+
+    ShellVar *var = find_variable(name);
+    if (var) { // Variable exists
+        if (var->is_readonly) {
+            //printf("sh: %s: readonly variable\n", name);
+            return -1; // Cannot modify readonly variable's value or non-readonly flags
+        }
+        mystrcpy(var->value, value ? value : "");
+        if (update_flags_if_exists) {
+            var->is_exported = export_flag;
+            // Only allow setting readonly, not clearing it if already readonly (though caught above)
+            if (readonly_flag) var->is_readonly = 1;
+        }
+    } else { // New variable
+        var = find_free_slot();
+        if (!var) {
+            //printf("sh: maximum number of variables reached\n");
+            return -1;
+        }
+        mystrcpy(var->name, name);
+        mystrcpy(var->value, value ? value : "");
+        var->is_exported = export_flag;
+        var->is_readonly = readonly_flag;
+        var->is_set = 1;
+        num_set_vars++;
+    }
+    return 0;
+}
+
+int unset_variable(const char *name) {
+    ShellVar *var = find_variable(name);
+    if (!var) {
+        // Bash typically doesn't error here, but for MOS, let's be stricter.
+        //printf("sh: %s: not found\n", name);
+        return -1;
+    }
+    if (var->is_readonly) {
+        //printf("sh: %s: readonly variable\n", name);
+        return -1;
+    }
+    var->is_set = 0;
+    var->name[0] = '\0'; // Clear name for easier free slot finding
+    num_set_vars--;
+    return 0;
+}
+
+void print_all_variables() {
+    for (int i = 0; i < MAX_SHELL_VARS; ++i) {
+        if (shell_vars[i].is_set) {
+            // Format: <var>=<val>
+            // Optionally, could add prefixes like 'export ' or 'readonly '
+            printf("%s%s%s=%s\n",
+                   shell_vars[i].is_exported ? "" : "", // For more bash-like output, if desired
+                   shell_vars[i].is_readonly ? "" : "",
+                   shell_vars[i].name,
+                   shell_vars[i].value);
+        }
+    }
+}
+
+char* get_variable_value(const char *name) {
+    ShellVar *var = find_variable(name);
+    if (var && var->is_set) {
+        return var->value;
+    }
+    return NULL; // Or "" for empty string if not found
+}
+
+char *mystrchr(const char *str, char c) {
+    // 遍历字符串直到遇到 '\0'
+    while (*str) {
+        if (*str == (char)c) {
+            return (char *)str; // 找到字符，返回指针
+        }
+        str++;
+    }
+    // 检查是否查找的是 '\0'
+    if (c == '\0') {
+        return (char *)str;
+    }
+    return NULL; // 未找到字符
+}
+
