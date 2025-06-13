@@ -1,7 +1,6 @@
 #include <args.h>
 #include <lib.h>
 #include <fs.h>     // Added for O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, O_APPEND
-//#include <stdlib.h> // Commented out to avoid exit conflict initially
 
 // --- Configuration ---
 #define MAX_INPUT_BUF 1024
@@ -14,8 +13,18 @@
 #define UP 'A'
 #define DOWN 'B'
 #define OTHER -1
+#define HISTFILESIZE 20
 #define HISTORY_FILE "/.mos_history"
 #define WHITESPACE " \t\r\n"
+
+static char history_lines[HISTFILESIZE][MAX_INPUT_BUF];
+static int history_count = 0;         // Number of items currently in history_lines
+static int history_add_idx = 0;       // Index in history_lines to add the next command (circular)
+static int history_latest_idx = -1;   // Index of the most recently added command in history_lines (circular)
+                                      // -1 if history is empty.
+static int history_current_nav_offset = 0; // Navigation: 0 = current line, 1 = prev, 2 = prev-prev etc.
+                                           // Max value is history_count.
+static char current_typed_line[MAX_INPUT_BUF] = {0}; // Buffer to save what user is currently typing
 
 char expansion_buffer_pool[100][MAX_EXPANDED_STR_LEN]; // Pool for expanded strings
 int expansion_buffer_pool_index = 0;
@@ -517,7 +526,8 @@ int is_inner_cmd(CMDNodeData *cmd) {
 	    mystrcmp(cmd->argv[0], "pwd") == 0 ||
 	    mystrcmp(cmd->argv[0], "exit") == 0 ||
 	    mystrcmp(cmd->argv[0], "declare") == 0 ||
-	    mystrcmp(cmd->argv[0], "unset") == 0 ) {
+	    mystrcmp(cmd->argv[0], "unset") == 0 ||
+	    mystrcmp(cmd->argv[0], "history") == 0) {
 		return 1;
 	} else {
 		return 0;
@@ -619,7 +629,26 @@ void execute_inner_cmd(CMDNodeData *cmd) {
             		return;
         	}
         	unset_variable(cmd->argv[1]);
-    	}
+    	} else if (mystrcmp(cmd->argv[0], "history") == 0) {
+ 		if (cmd->argc > 1) {
+        		printf("history: too many arguments\n");
+        		return; // Or return an error code for builtins
+    		}
+    		int start_idx;
+    		if (history_count == 0) {
+        		return; // Nothing to print
+    		}
+    		if (history_count < HISTFILESIZE) {
+        		start_idx = 0;
+    		} else {
+        		start_idx = history_add_idx; // Oldest is where next add would go
+    		}
+    		for (int i = 0; i < history_count; ++i) {
+        		int current_entry_idx = (start_idx + i) % HISTFILESIZE;
+        		// Bash history usually prints with line numbers. For MOS, just the command.
+        		printf("%s\n", history_lines[current_entry_idx]);
+    		}
+	}
 }
 
 int get_final_path(const char *cwd, const char *path, char *finalpath) {
@@ -790,7 +819,6 @@ void execute_ast(ASTNode *node) {
 	    	execute_inner_cmd(cmd);
 		break;
 	    }
-
             child_pid = fork();
             if (child_pid < 0) {
                 user_panic("execute_ast: fork for command failed");
@@ -961,223 +989,216 @@ char copy_buf[1024];
 
 void readline(char *buf, u_int n, int interactive) {
     int r;
-    u_int current_len = 0;    // Current number of characters in the buffer
-    u_int cursor_pos = 0;     // Cursor's logical position within buf (0 to current_len)
+    u_int current_len; // current_len of 'buf'
+    u_int cursor_pos;  // cursor_pos within 'buf'
     char c;
-    // onscreen_cmd_len tracks the length of the command part (excluding prompt)
-    // that was displayed on the screen in the *previous* rendering.
-    // This is crucial for knowing how many characters to clear if the line shrinks.
-    u_int onscreen_cmd_len = 0;
+    u_int onscreen_cmd_len = 0; // Length of command part previously on screen (excluding prompt)
 
     if (n == 0) return;
-    buf[0] = '\0'; // Initialize buffer as empty
+
+    // Initialize buf and cursor based on current navigation state
+    if (history_current_nav_offset == 0) { // User is on the "new input" line
+        mystrcpy(buf, current_typed_line); // Restore current typing if any
+    } else {
+        // Navigating history: history_current_nav_offset is 1-based for history array
+        // Calculate actual index in circular buffer:
+        // (history_latest_idx - (offset - 1) + HISTFILESIZE) % HISTFILESIZE
+        int nav_idx_in_hist_array = (history_latest_idx - (history_current_nav_offset - 1) + HISTFILESIZE) % HISTFILESIZE;
+        if (history_count > 0 && history_current_nav_offset <= history_count) { // Ensure valid offset
+             mystrcpy(buf, history_lines[nav_idx_in_hist_array]);
+        } else { // Should not happen if logic is correct, fallback to empty
+            buf[0] = '\0';
+        }
+    }
+    current_len = mystrlen(buf);
+    cursor_pos = current_len; // Start with cursor at the end of the (potentially recalled) line
+
+    // Initial draw if interactive and buffer is pre-filled (e.g., from history)
+    if (interactive && current_len > 0) {
+        printf("\r$ "); // Prompt
+        for (u_int i = 0; i < current_len; ++i) printf("%c", buf[i]);
+        onscreen_cmd_len = current_len;
+        // Cursor is already at end, no backspacing needed for initial draw.
+    } else if (interactive) { // Empty buffer, just need prompt for initial state
+        // Prompt is printed by main loop *before* calling readline usually.
+        // If readline is solely responsible for ALL screen updates after prompt:
+        // printf("\r$ "); // But only if not already printed by main.
+        // Let's assume main prints the prompt, readline manages *after* it.
+        // So onscreen_cmd_len starts at 0.
+    }
+
 
     for (;;) {
-        if ((r = read(0, &c, 1)) != 1) { // Read one character
+        if ((r = read(0, &c, 1)) != 1) {
             if (r <= 0) { // EOF or Error
-                if (interactive && current_len == 0 && r == 0) {
-                    printf("exit\n"); // Mimic bash behavior for Ctrl+D on empty line
-                }
-                exit(); // Exit the shell process for any EOF or read error
+                if (interactive && current_len == 0 && r == 0) printf("exit\n");
+                exit();
             }
-            // Should not be reached if read() has typical blocking behavior
-            buf[current_len] = 0;
-            return;
+            buf[current_len] = 0; return; // Should ideally not be reached
         }
 
-        int requires_full_reprint = 0; // Flag to determine if a full line redraw is needed
+        int requires_full_reprint = 0;
 
-        if (c == 0x1b) { // ESC - Potential start of an escape sequence (e.g., arrow keys)
+        // If user types anything (except navigation), they are editing the current line.
+        // If they were navigating history, this "detaches" them from pure history browsing.
+        // The current buffer (which might be a recalled history line) becomes the new current_typed_line.
+        if (c != 0x1b) { // Not an ESC sequence (i.e., not an arrow key attempt)
+            if (history_current_nav_offset != 0) {
+                mystrcpy(current_typed_line, buf); // Save the (potentially modified) history line
+                history_current_nav_offset = 0;    // Now editing the "new" line
+            }
+        }
+
+
+        if (c == 0x1b) { // ESC - Arrow keys
             char seq[2];
-            if (read(0, &seq[0], 1) != 1) continue; // Expected '['
+            if (read(0, &seq[0], 1) != 1) continue;
             if (seq[0] == '[') {
-                if (read(0, &seq[1], 1) != 1) continue; // Expected A/B/C/D
+                if (read(0, &seq[1], 1) != 1) continue;
 
-                if (seq[1] == 'D') { // Left Arrow (ESC [ D)
+                if (seq[1] == 'A') { // Up Arrow
+                    if (history_count > 0) {
+                        if (history_current_nav_offset == 0) { // Was on new typed line
+                            mystrcpy(current_typed_line, buf); // Save current typing
+                        }
+                        if (history_current_nav_offset < history_count) {
+                            history_current_nav_offset++;
+                            // Recalculate index and update buf
+                            int nav_idx_in_hist_array = (history_latest_idx - (history_current_nav_offset - 1) + HISTFILESIZE) % HISTFILESIZE;
+                            mystrcpy(buf, history_lines[nav_idx_in_hist_array]);
+                            current_len = mystrlen(buf);
+                            cursor_pos = current_len;
+                            requires_full_reprint = 1;
+                        }
+                    }
+                } else if (seq[1] == 'B') { // Down Arrow
+                    if (history_current_nav_offset > 0) {
+                        history_current_nav_offset--;
+                        if (history_current_nav_offset == 0) { // Reached current typed line buffer
+                            mystrcpy(buf, current_typed_line);
+                        } else {
+                            int nav_idx_in_hist_array = (history_latest_idx - (history_current_nav_offset - 1) + HISTFILESIZE) % HISTFILESIZE;
+                            mystrcpy(buf, history_lines[nav_idx_in_hist_array]);
+                        }
+                        current_len = mystrlen(buf);
+                        cursor_pos = current_len;
+                        requires_full_reprint = 1;
+                    }
+                } else if (seq[1] == 'D') { // Left Arrow
                     if (cursor_pos > 0) {
                         cursor_pos--;
-                        //if (interactive) printf("\b"); // Visually move cursor left (standard backspace)
+                        requires_full_reprint = 1;
                     }
-                } else if (seq[1] == 'C') { // Right Arrow (ESC [ C)
+                } else if (seq[1] == 'C') { // Right Arrow
                     if (cursor_pos < current_len) {
-                        // To move right visually, print the character that the cursor is currently "on"
-                        // The cursor will then be after this character.
-                        //if (interactive) printf("%c", buf[cursor_pos]);
                         cursor_pos++;
+                        requires_full_reprint = 1;
                     }
-                } else if (seq[1] == 'A' || seq[1] == 'B') { // Up or Down Arrow
-                    // TODO: Implement history browsing if desired
                 }
-                // Simple arrow key movements generally don't require a full line reprint
-                // if the terminal handles \b and char printing for movement correctly.
-                // The onscreen_cmd_len doesn't change with only cursor movement.
-                continue;
             }
-            // If ESC was followed by something other than '[', it's an unhandled sequence for now.
-        } else if (c == '\b' || c == 0x7f) { // Backspace or ASCII DEL
-            if (cursor_pos > 0) { // If there's a character to the left of the cursor to delete
-                // Shift characters from cursor_pos to the end, one position to the left
-                mymemmove(&buf[cursor_pos - 1], &buf[cursor_pos], current_len - cursor_pos + 1); // +1 to include null terminator
+        } else if (c == '\b' || c == 0x7f) { // Backspace or DEL
+             if (history_current_nav_offset != 0) { // Editing a history item
+                mystrcpy(current_typed_line, buf); // Current buf is basis of edit
+                history_current_nav_offset = 0;
+            }
+            if (cursor_pos > 0) {
+                mymemmove(&buf[cursor_pos - 1], &buf[cursor_pos], current_len - cursor_pos + 1);
                 cursor_pos--;
                 current_len--;
-                // buf[current_len] is now the new null terminator due to memmove
                 requires_full_reprint = 1;
             }
-        } else if (c == '\r' || c == '\n') { // Enter key
-	    	buf[current_len] = 0;          // Finalize the buffer
-    		if (interactive) {
-        		printf("\n");              // Move to next line for subsequent output
-    		}
-    		return;
-        } else if (c >= 0x20 && c < 0x7f) { // Printable ASCII character
-            if (current_len < n - 1) { // Ensure space for char + null terminator
-                // If inserting in the middle of the string (not at the end)
-                if (cursor_pos < current_len) {
-                    // Shift characters from cursor_pos to the end, one position to the right
-                    mymemmove(&buf[cursor_pos + 1], &buf[cursor_pos], current_len - cursor_pos + 1); // +1 for null
+        } else if (c == 0x01) { /* Ctrl-A */
+            if (cursor_pos != 0) { cursor_pos = 0; requires_full_reprint = 1;}
+        } else if (c == 0x05) { /* Ctrl-E */
+            if (cursor_pos != current_len) { cursor_pos = current_len; requires_full_reprint = 1;}
+        } else if (c == 0x0B) { /* Ctrl-K */
+             if (history_current_nav_offset != 0) { // Editing a history item
+                mystrcpy(current_typed_line, buf);
+                history_current_nav_offset = 0;
+            }
+            if (cursor_pos < current_len) {
+                buf[cursor_pos] = '\0'; current_len = cursor_pos; requires_full_reprint = 1;
+            }
+        } else if (c == 0x15) { /* Ctrl-U */
+            if (history_current_nav_offset != 0) { // Editing a history item
+                mystrcpy(current_typed_line, buf);
+                history_current_nav_offset = 0;
+            }
+            if (cursor_pos > 0) {
+                mymemmove(&buf[0], &buf[cursor_pos], current_len - cursor_pos + 1);
+                current_len -= cursor_pos; cursor_pos = 0; requires_full_reprint = 1;
+            }
+        } else if (c == 0x17) { /* Ctrl-W */
+            if (history_current_nav_offset != 0) { // Editing a history item
+                mystrcpy(current_typed_line, buf);
+                history_current_nav_offset = 0;
+            }
+            if (cursor_pos > 0) {
+                u_int original_cursor_pos = cursor_pos;
+                u_int end_of_deletion_span = cursor_pos;
+                while (cursor_pos > 0 && strchr(" \t", buf[cursor_pos - 1])) cursor_pos--;
+                u_int start_of_word_to_delete = cursor_pos;
+                while (start_of_word_to_delete > 0 && !strchr(" \t", buf[start_of_word_to_delete - 1])) {
+                    start_of_word_to_delete--;
                 }
-                buf[cursor_pos] = c; // Insert the new character
+                if (start_of_word_to_delete < end_of_deletion_span) {
+                    mymemmove(&buf[start_of_word_to_delete], &buf[end_of_deletion_span], current_len - end_of_deletion_span + 1);
+                    current_len -= (end_of_deletion_span - start_of_word_to_delete);
+                    cursor_pos = start_of_word_to_delete;
+                    requires_full_reprint = 1;
+                } else {
+                    cursor_pos = original_cursor_pos;
+                }
+            }
+        } else if (c == '\r' || c == '\n') { // Enter
+            buf[current_len] = 0;
+            if (history_current_nav_offset != 0) { // If Enter is pressed on a history line
+                mystrcpy(current_typed_line, buf); // This line becomes the current typed line
+            } else { // Enter on a newly typed line or edited line
+                mystrcpy(current_typed_line, buf); // Also update current_typed_line
+            }
+            // history_current_nav_offset is reset by add_to_history after command execution
+            if (interactive) printf("\n");
+            return;
+        } else if (c >= 0x20 && c < 0x7f) { // Printable character
+            if (history_current_nav_offset != 0) { // Editing a history item
+                // Current `buf` (which is a history line) becomes the basis for `current_typed_line`
+                mystrcpy(current_typed_line, buf);
+                history_current_nav_offset = 0; // Now editing this as a "new" line
+                // The character 'c' will be inserted into this new current_typed_line (which is now `buf`)
+            }
+            if (current_len < n - 1) {
+                if (cursor_pos < current_len) {
+                    mymemmove(&buf[cursor_pos + 1], &buf[cursor_pos], current_len - cursor_pos + 1);
+                }
+                buf[cursor_pos] = c;
                 current_len++;
                 cursor_pos++;
-                // buf[current_len] is already null due to memmove or string growth
                 requires_full_reprint = 1;
             }
-            // Else: buffer is full, character ignored (or beep, etc.)
         }
-        // Other non-printable/control characters are ignored for simplicity
 
         if (requires_full_reprint && interactive) {
-            // --- Full Line Reprint Logic ---
-            // 1. Go to the beginning of the current physical line (where prompt starts)
             printf("\r");
+            printf("$ ");
 
-            // 2. Re-print the prompt.
-            printf("$ "); // Assuming "$ " is your prompt
-
-            // 3. Print the current buffer content.
             for (u_int i = 0; i < current_len; ++i) {
                 printf("%c", buf[i]);
             }
 
-            // 4. Clear any characters from the previous, potentially longer, line display.
-            //    (compare current_len with onscreen_cmd_len)
             if (current_len < onscreen_cmd_len) {
                 for (u_int i = 0; i < (onscreen_cmd_len - current_len); ++i) {
-                    printf(" "); // Overwrite with spaces
+                    printf(" ");
                 }
             }
 
-            // 5. Position the visual cursor back to its logical position (cursor_pos).
-            //    After printing and clearing, the physical cursor is at the end of the (cleared) area.
-            //    Number of backspaces needed: (length of currently displayed part, excluding prompt) - cursor_pos
-            u_int effective_displayed_len = (current_len > onscreen_cmd_len) ? current_len : onscreen_cmd_len;
-            for (u_int i = 0; i < (effective_displayed_len - cursor_pos); ++i) {
-                printf("\b"); // Move visual cursor back
+            u_int effective_displayed_cmd_len = (current_len > onscreen_cmd_len) ? current_len : onscreen_cmd_len;
+            for (u_int i = 0; i < (effective_displayed_cmd_len - cursor_pos); ++i) {
+                printf("\b");
             }
-            onscreen_cmd_len = current_len; // Update for the next iteration
+            onscreen_cmd_len = current_len;
         }
     }
-}
-
-void readline1(char *buf, u_int n, int interactive) {
-	char ope[20][600];int size;
-	read_history(ope,&size);
-	int r,cur = size;
-	for (int i = 0; i < n; i++) {
-		if ((r = read(0, buf + i, 1)) != 1) {
-			if (r < 0) {
-				debugf("read error: %d\n", r);
-			}
-			exit();
-		}
-		if (buf[i] == '\b' || buf[i] == 0x7f) {
-			if (i > 0) {
-				i -= 2;
-			} else {
-				i = -1;
-			}
-			if (buf[i] != '\b') {
-				printf("\b \b");
-			}
-		}
-		if (buf[i] == '\r' || buf[i] == '\n') {
-			buf[i] = 0;
-			memcpy(copy_buf,buf,strlen(buf)+1);
-			return;
-		}
-		if (buf[i]==27) {
-			++i;read(0,buf+i,1);
-			++i;read(0,buf+i,1);
-			int la_len=0;
-			if (cur == size) la_len = i;
-			else la_len = mystrlen(ope[cur])-1;
-                        if (buf[i]=='A') {
-				printf("%c[B",27);
-				if ((--cur) < (size==20))
-					cur = (size == 20);
-			} else if (buf[i] == 'B') {
-				if ((++cur) > size) 
-					cur = size;
-			}
-			int j;for (j=0;j<la_len;++j) printf("\b \b");
-			i -= 3;
-			if (cur == size) {
-				for (j=0;j<=i;++j) printf("%c",buf[j]);
-			} else {
-				int len = mystrlen(ope[cur])-1;
-				for (j=0;j<len;++j) printf("%c",ope[cur][j]);
-			}
-		}
-				
-	}
-	debugf("line too long\n");
-	while ((r = read(0, buf, 1)) == 1 && buf[0] != '\r' && buf[0] != '\n') {
-		;
-	}
-	buf[0] = 0;
-	copy_buf[0]=0;
-}
-
-void read_history(char ope[][600],int *sz) {
-	int top=0,fd;int size = 0;
-	fd = open(HISTORY_FILE,O_RDONLY);
-	if (fd < 0) {
-		fd = open(HISTORY_FILE,O_CREAT);
-		close(fd);
-		fd = open(HISTORY_FILE,O_RDONLY);
-	}
-        int la;char c;
-        while (1) {
-                la=read(fd,&c,1);
-                if (la!=1) {
-			break;
-		}
-               if (c=='\r' || c == '\n') {
-                       ope[size][top++]='\n';ope[size][top]='\0';
-                       ++size;top=0;
-                        while ((la=read(fd,&c,1)) == 1 && strchr(WHITESPACE, c));
-                        if (la != 1) break;
-               }
-               ope[size][top++]=c;
-        }
-	*sz = size;
-	close(fd);
-}
-
-void write_history(char *buf) {
-	char ope[20][600];int size = 0,top=0;
-	read_history(ope,&size);
-	remove(HISTORY_FILE);
-	int fd = open(HISTORY_FILE,O_CREAT);
-	close(fd);
-	fd = open(HISTORY_FILE,O_WRONLY);
-	int i;
-	for (i=(size==20);i < size;++i) {
-		write(fd,ope[i],strlen(ope[i]));
-	}
-	top = mystrlen(buf);buf[top++]='\n';buf[top]='\0';
-	write(fd,buf,top);
-	close(fd);
 }
 
 
@@ -1187,6 +1208,128 @@ char input_buf[MAX_INPUT_BUF];
 void usage(void) {
     printf("usage: sh [-ix] [script-file]\n");
     exit(); 
+}
+
+
+void load_history() {
+    int fd, r, i;
+    char line_buf[MAX_INPUT_BUF];
+    int line_len = 0;
+    char c;
+
+    history_count = 0;
+    history_add_idx = 0;
+    history_latest_idx = -1;
+
+    fd = open(HISTORY_FILE, O_RDONLY);
+    if (fd < 0) {
+        // debugf("No history file found or error opening. Starting fresh.\n");
+        return; // No history file, or can't open it.
+    }
+
+    // Read line by line
+    // This is a simple line reader; a more robust one might be needed.
+    // We are loading into history_lines, effectively making the file content our initial history.
+    // We want to load them in order such that history_lines[0] is oldest of the loaded ones, up to HISTFILESIZE.
+    // A simpler way is to read all lines, then take the last HISTFILESIZE.
+    // For now, let's read and fill the circular buffer.
+
+    char temp_history_load[HISTFILESIZE][MAX_INPUT_BUF];
+    int temp_count = 0;
+
+    while ((r = read(fd, &c, 1)) == 1) {
+        if (c == '\n') {
+            if (line_len > 0) { // Avoid empty lines from history file
+                line_buf[line_len] = '\0';
+                if (temp_count < HISTFILESIZE) {
+                    mystrcpy(temp_history_load[temp_count++], line_buf);
+                } else { // Shift older entries if file has more than HISTFILESIZE
+                    for(i = 0; i < HISTFILESIZE - 1; ++i) {
+                        mystrcpy(temp_history_load[i], temp_history_load[i+1]);
+                    }
+                    mystrcpy(temp_history_load[HISTFILESIZE-1], line_buf);
+                }
+                line_len = 0;
+            }
+        } else if (line_len < MAX_INPUT_BUF - 1) {
+            line_buf[line_len++] = c;
+        }
+    }
+    // Handle last line if no trailing newline
+    if (line_len > 0) {
+        line_buf[line_len] = '\0';
+        if (temp_count < HISTFILESIZE) {
+            mystrcpy(temp_history_load[temp_count++], line_buf);
+        } else {
+             for(i = 0; i < HISTFILESIZE - 1; ++i) {
+                mystrcpy(temp_history_load[i], temp_history_load[i+1]);
+            }
+            mystrcpy(temp_history_load[HISTFILESIZE-1], line_buf);
+        }
+    }
+
+    // Now populate the actual history_lines and set indices correctly
+    for (i = 0; i < temp_count; ++i) {
+        mystrcpy(history_lines[history_add_idx], temp_history_load[i]);
+        history_latest_idx = history_add_idx;
+        history_add_idx = (history_add_idx + 1) % HISTFILESIZE;
+        if (history_count < HISTFILESIZE) {
+            history_count++;
+        }
+    }
+    close(fd);
+    history_current_nav_offset = 0; // Start navigation at the current line
+}
+
+void save_history() {
+    int fd, i, r;
+    int start_idx;
+
+    fd = open(HISTORY_FILE, O_WRONLY | O_CREAT | O_TRUNC); // Create if not exist, truncate to overwrite
+    if (fd < 0) {
+        printf("sh: error saving history to %s\n", HISTORY_FILE);
+        return;
+    }
+
+    if (history_count == 0) {
+        close(fd);
+        return;
+    }
+
+    // Determine the starting index to write from (oldest entry in circular buffer)
+    if (history_count < HISTFILESIZE) {
+        start_idx = 0; // History hasn't wrapped around yet
+    } else {
+        start_idx = history_add_idx; // Oldest is where the next add would overwrite
+    }
+
+    for (i = 0; i < history_count; ++i) {
+        int current_entry_idx = (start_idx + i) % HISTFILESIZE;
+        r = write(fd, history_lines[current_entry_idx], mystrlen(history_lines[current_entry_idx]));
+        if (r < 0) break; // Error writing
+        r = write(fd, "\n", 1);
+        if (r < 0) break; // Error writing newline
+    }
+    close(fd);
+}
+
+// Function to add a command to in-memory history
+void add_to_history(const char *cmd_line) {
+    if ( cmd_line[0] == '\0') return; // Don't add empty lines
+
+    // Optional: Don't add if same as last command
+    if (history_count > 0 && mystrcmp(history_lines[history_latest_idx], cmd_line) == 0) {
+        return;
+    }
+
+    mystrcpy(history_lines[history_add_idx], cmd_line);
+    history_latest_idx = history_add_idx;
+    history_add_idx = (history_add_idx + 1) % HISTFILESIZE;
+    if (history_count < HISTFILESIZE) {
+        history_count++;
+    }
+    // After adding, reset navigation to current line (offset 0)
+    history_current_nav_offset = 0;
 }
 
 
@@ -1264,6 +1407,7 @@ int main(int argc, char **argv) {
         interactive = 0; 
     }
 
+    load_history();
 
     for (;;) {
         reset_allocators(); 
@@ -1273,9 +1417,11 @@ int main(int argc, char **argv) {
             printf("\n$ ");
             // Explicitly flush prompt for interactive mode
         }
-        
+    	if (history_current_nav_offset == 0) { // If we are about to type a brand new line
+            current_typed_line[0] = '\0'; // Clear the "current typing" buffer
+        }    
         readline(input_buf, sizeof input_buf, interactive);
-
+	//printf("input_buf: %s\n", input_buf);
         if (input_buf[0] == '\0') { // Empty line or EOF from readline
             if (interactive) {
                 // Check if it was a real EOF (Ctrl+D on its own line)
@@ -1309,7 +1455,9 @@ int main(int argc, char **argv) {
         if (*temp_scan == '#' || *temp_scan == '\0') {
             continue; 
         }
-
+	
+	add_to_history(input_buf); // Add to in-memory history
+        save_history();            // Save all history to file
         tokenizer_init(input_buf); // Initialize tokenizer for *each line*
         ASTNode *ast = parse_line();
 
