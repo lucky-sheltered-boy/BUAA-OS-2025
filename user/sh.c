@@ -11,10 +11,19 @@
 #define MAX_VAR_VALUE_LEN 16
 #define MAX_SHELL_VARS 128 // Arbitrary limit
 #define MAX_EXPANDED_STR_LEN (MAX_TOKEN_LEN * 2) // Or some reasonable upper bound
+#define UP 'A'
+#define DOWN 'B'
+#define OTHER -1
+#define HISTORY_FILE "/.mos_history"
+#define WHITESPACE " \t\r\n"
 
 char expansion_buffer_pool[100][MAX_EXPANDED_STR_LEN]; // Pool for expanded strings
 int expansion_buffer_pool_index = 0;
 char* expand_string_variables(char *input_str);
+void *mymemmove(void *dest, const void *src, int n);
+void write_history(char *buf);
+void read_history(char ope[][600],int *sz);
+
 
 typedef struct {
     char name[MAX_VAR_NAME_LEN + 1];
@@ -942,52 +951,237 @@ void execute_ast(ASTNode *node) {
             user_panic("Unknown AST node type: %d", node->type);
     }
 }
+char outbuf[20000];
+char now_cmd_buf[1025];
 
+int all_line_count; // 表示指令总数量，上限20
+int now_line_index; // 表示光标当前所在指令索引
+char all_lines[25][1025];
+char copy_buf[1024];
 
 void readline(char *buf, u_int n, int interactive) {
-	int r;
-	u_int i = 0; 
-	char c;
+    int r;
+    u_int current_len = 0;    // Current number of characters in the buffer
+    u_int cursor_pos = 0;     // Cursor's logical position within buf (0 to current_len)
+    char c;
+    // onscreen_cmd_len tracks the length of the command part (excluding prompt)
+    // that was displayed on the screen in the *previous* rendering.
+    // This is crucial for knowing how many characters to clear if the line shrinks.
+    u_int onscreen_cmd_len = 0;
 
-	for (i = 0; i < n - 1; /* i is managed inside */ ) { 
-		if ((r = read(0, &c, 1)) != 1) {
-			buf[i] = 0; 
-			if (interactive && r==0) { /* Ctrl+D on empty line */ }
-			else if (r < 0 && interactive) { debugf("readline: read error: %d\n", r); }
-			// Shell exit on read error or non-interactive EOF
-			if (r < 0 || (!interactive && r==0)) {
-				if (interactive && r==0) { printf("exit\n"); } // Make it explicit for Ctrl+D
-				exit();
-			}
-			return; 
-		}
+    if (n == 0) return;
+    buf[0] = '\0'; // Initialize buffer as empty
 
-		if (c == '\b' || c == 0x7f) { 
-			if (i > 0) {
-				i--; 
-			}
-		} else if (c == '\r' || c == '\n') {
-			if (interactive) {
-                printf("\n"); 
+    for (;;) {
+        if ((r = read(0, &c, 1)) != 1) { // Read one character
+            if (r <= 0) { // EOF or Error
+                if (interactive && current_len == 0 && r == 0) {
+                    printf("exit\n"); // Mimic bash behavior for Ctrl+D on empty line
+                }
+                exit(); // Exit the shell process for any EOF or read error
             }
-			buf[i] = 0;
-			return;
-		} else {
-			buf[i] = c;
-            i++; 
+            // Should not be reached if read() has typical blocking behavior
+            buf[current_len] = 0;
+            return;
+        }
+
+        int requires_full_reprint = 0; // Flag to determine if a full line redraw is needed
+
+        if (c == 0x1b) { // ESC - Potential start of an escape sequence (e.g., arrow keys)
+            char seq[2];
+            if (read(0, &seq[0], 1) != 1) continue; // Expected '['
+            if (seq[0] == '[') {
+                if (read(0, &seq[1], 1) != 1) continue; // Expected A/B/C/D
+
+                if (seq[1] == 'D') { // Left Arrow (ESC [ D)
+                    if (cursor_pos > 0) {
+                        cursor_pos--;
+                        //if (interactive) printf("\b"); // Visually move cursor left (standard backspace)
+                    }
+                } else if (seq[1] == 'C') { // Right Arrow (ESC [ C)
+                    if (cursor_pos < current_len) {
+                        // To move right visually, print the character that the cursor is currently "on"
+                        // The cursor will then be after this character.
+                        //if (interactive) printf("%c", buf[cursor_pos]);
+                        cursor_pos++;
+                    }
+                } else if (seq[1] == 'A' || seq[1] == 'B') { // Up or Down Arrow
+                    // TODO: Implement history browsing if desired
+                }
+                // Simple arrow key movements generally don't require a full line reprint
+                // if the terminal handles \b and char printing for movement correctly.
+                // The onscreen_cmd_len doesn't change with only cursor movement.
+                continue;
+            }
+            // If ESC was followed by something other than '[', it's an unhandled sequence for now.
+        } else if (c == '\b' || c == 0x7f) { // Backspace or ASCII DEL
+            if (cursor_pos > 0) { // If there's a character to the left of the cursor to delete
+                // Shift characters from cursor_pos to the end, one position to the left
+                mymemmove(&buf[cursor_pos - 1], &buf[cursor_pos], current_len - cursor_pos + 1); // +1 to include null terminator
+                cursor_pos--;
+                current_len--;
+                // buf[current_len] is now the new null terminator due to memmove
+                requires_full_reprint = 1;
+            }
+        } else if (c == '\r' || c == '\n') { // Enter key
+	    	buf[current_len] = 0;          // Finalize the buffer
+    		if (interactive) {
+        		printf("\n");              // Move to next line for subsequent output
+    		}
+    		return;
+        } else if (c >= 0x20 && c < 0x7f) { // Printable ASCII character
+            if (current_len < n - 1) { // Ensure space for char + null terminator
+                // If inserting in the middle of the string (not at the end)
+                if (cursor_pos < current_len) {
+                    // Shift characters from cursor_pos to the end, one position to the right
+                    mymemmove(&buf[cursor_pos + 1], &buf[cursor_pos], current_len - cursor_pos + 1); // +1 for null
+                }
+                buf[cursor_pos] = c; // Insert the new character
+                current_len++;
+                cursor_pos++;
+                // buf[current_len] is already null due to memmove or string growth
+                requires_full_reprint = 1;
+            }
+            // Else: buffer is full, character ignored (or beep, etc.)
+        }
+        // Other non-printable/control characters are ignored for simplicity
+
+        if (requires_full_reprint && interactive) {
+            // --- Full Line Reprint Logic ---
+            // 1. Go to the beginning of the current physical line (where prompt starts)
+            printf("\r");
+
+            // 2. Re-print the prompt.
+            printf("$ "); // Assuming "$ " is your prompt
+
+            // 3. Print the current buffer content.
+            for (u_int i = 0; i < current_len; ++i) {
+                printf("%c", buf[i]);
+            }
+
+            // 4. Clear any characters from the previous, potentially longer, line display.
+            //    (compare current_len with onscreen_cmd_len)
+            if (current_len < onscreen_cmd_len) {
+                for (u_int i = 0; i < (onscreen_cmd_len - current_len); ++i) {
+                    printf(" "); // Overwrite with spaces
+                }
+            }
+
+            // 5. Position the visual cursor back to its logical position (cursor_pos).
+            //    After printing and clearing, the physical cursor is at the end of the (cleared) area.
+            //    Number of backspaces needed: (length of currently displayed part, excluding prompt) - cursor_pos
+            u_int effective_displayed_len = (current_len > onscreen_cmd_len) ? current_len : onscreen_cmd_len;
+            for (u_int i = 0; i < (effective_displayed_len - cursor_pos); ++i) {
+                printf("\b"); // Move visual cursor back
+            }
+            onscreen_cmd_len = current_len; // Update for the next iteration
+        }
+    }
+}
+
+void readline1(char *buf, u_int n, int interactive) {
+	char ope[20][600];int size;
+	read_history(ope,&size);
+	int r,cur = size;
+	for (int i = 0; i < n; i++) {
+		if ((r = read(0, buf + i, 1)) != 1) {
+			if (r < 0) {
+				debugf("read error: %d\n", r);
+			}
+			exit();
 		}
+		if (buf[i] == '\b' || buf[i] == 0x7f) {
+			if (i > 0) {
+				i -= 2;
+			} else {
+				i = -1;
+			}
+			if (buf[i] != '\b') {
+				printf("\b \b");
+			}
+		}
+		if (buf[i] == '\r' || buf[i] == '\n') {
+			buf[i] = 0;
+			memcpy(copy_buf,buf,strlen(buf)+1);
+			return;
+		}
+		if (buf[i]==27) {
+			++i;read(0,buf+i,1);
+			++i;read(0,buf+i,1);
+			int la_len=0;
+			if (cur == size) la_len = i;
+			else la_len = mystrlen(ope[cur])-1;
+                        if (buf[i]=='A') {
+				printf("%c[B",27);
+				if ((--cur) < (size==20))
+					cur = (size == 20);
+			} else if (buf[i] == 'B') {
+				if ((++cur) > size) 
+					cur = size;
+			}
+			int j;for (j=0;j<la_len;++j) printf("\b \b");
+			i -= 3;
+			if (cur == size) {
+				for (j=0;j<=i;++j) printf("%c",buf[j]);
+			} else {
+				int len = mystrlen(ope[cur])-1;
+				for (j=0;j<len;++j) printf("%c",ope[cur][j]);
+			}
+		}
+				
 	}
-    // Buffer full
-	if (interactive) printf("\n"); 
-	debugf("readline: line too long\n");
-	buf[n-1] = 0; 
-	
-	char discard_char;
-	while ((r = read(0, &discard_char, 1)) == 1 && discard_char != '\r' && discard_char != '\n');
+	debugf("line too long\n");
+	while ((r = read(0, buf, 1)) == 1 && buf[0] != '\r' && buf[0] != '\n') {
+		;
+	}
+	buf[0] = 0;
+	copy_buf[0]=0;
+}
+
+void read_history(char ope[][600],int *sz) {
+	int top=0,fd;int size = 0;
+	fd = open(HISTORY_FILE,O_RDONLY);
+	if (fd < 0) {
+		fd = open(HISTORY_FILE,O_CREAT);
+		close(fd);
+		fd = open(HISTORY_FILE,O_RDONLY);
+	}
+        int la;char c;
+        while (1) {
+                la=read(fd,&c,1);
+                if (la!=1) {
+			break;
+		}
+               if (c=='\r' || c == '\n') {
+                       ope[size][top++]='\n';ope[size][top]='\0';
+                       ++size;top=0;
+                        while ((la=read(fd,&c,1)) == 1 && strchr(WHITESPACE, c));
+                        if (la != 1) break;
+               }
+               ope[size][top++]=c;
+        }
+	*sz = size;
+	close(fd);
+}
+
+void write_history(char *buf) {
+	char ope[20][600];int size = 0,top=0;
+	read_history(ope,&size);
+	remove(HISTORY_FILE);
+	int fd = open(HISTORY_FILE,O_CREAT);
+	close(fd);
+	fd = open(HISTORY_FILE,O_WRONLY);
+	int i;
+	for (i=(size==20);i < size;++i) {
+		write(fd,ope[i],strlen(ope[i]));
+	}
+	top = mystrlen(buf);buf[top++]='\n';buf[top]='\0';
+	write(fd,buf,top);
+	close(fd);
 }
 
 
-// --- Main Shell Loop ---
+
 char input_buf[MAX_INPUT_BUF];
 
 void usage(void) {
@@ -1070,6 +1264,7 @@ int main(int argc, char **argv) {
         interactive = 0; 
     }
 
+
     for (;;) {
         reset_allocators(); 
         memset(input_buf, 0, sizeof(input_buf)); 
@@ -1104,6 +1299,7 @@ int main(int argc, char **argv) {
             }
         }
 
+
         if (echocmds && input_buf[0] != '\0') {
             printf("# %s\n", input_buf);
         }
@@ -1128,8 +1324,6 @@ int main(int argc, char **argv) {
                     printf("sh: syntax error near token '%s'\n", current_token.value);
                  }
             }
-        }
-        if (interactive) {
         }
     }
     return 0; 
@@ -1336,3 +1530,24 @@ char *mystrchr(const char *str, char c) {
     return NULL; // 未找到字符
 }
 
+void *mymemmove(void *dest, const void *src, int n) {
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+
+    // 如果源地址在目标地址之后，直接从前往后复制
+    if (d < s) {
+	int i;
+        for (i = 0; i < n; i++) {
+            d[i] = s[i];
+        }
+    }
+    // 如果源地址在目标地址之前，需从后往前复制以避免覆盖
+    else if (d > s) {
+	int i;
+        for ( i = n; i > 0; i--) {
+            d[i - 1] = s[i - 1];
+        }
+    }
+
+    return dest;
+}
