@@ -16,6 +16,15 @@
 #define HISTFILESIZE 20
 #define HISTORY_FILE "/.mos_history"
 #define WHITESPACE " \t\r\n"
+#define MAX_CMD_SUBST_OUTPUT_LEN (MAX_INPUT_BUF * 2) // Max length of output from one cmd subst
+#define MAX_CMD_SUBST_BUFFERS 10
+
+// New static pool for command substitution results
+static char cmd_subst_output_pool[MAX_CMD_SUBST_BUFFERS][MAX_CMD_SUBST_OUTPUT_LEN];
+static int cmd_subst_output_pool_idx = 0;
+
+// Forward declaration for the new helper function
+char* execute_command_substitution(const char* command_to_run, int parent_is_interactive);
 
 static char history_lines[HISTFILESIZE][MAX_INPUT_BUF];
 static int history_count = 0;         // Number of items currently in history_lines
@@ -140,11 +149,142 @@ int astnode_pool_index = 0;
 RedirNode redirnode_pool[100] = {0}; 
 int redirnode_pool_index = 0;
 
+char* get_subst_output_buffer() {
+    if (cmd_subst_output_pool_idx >= MAX_CMD_SUBST_BUFFERS) {
+        // This limits how many separate backtick expressions can be on one command line.
+        // Does not limit nesting depth with this simple model (nesting not supported yet).
+        printf("sh: too many command substitutions on one line\n");
+        // Returning a shared error buffer or NULL and checking might be better than panic.
+        // For now, if this happens, subsequent behavior is undefined or will use last buffer.
+        // A robust shell might parse and fail, or have dynamic allocation.
+        // Let's return the last buffer to avoid immediate crash, but with a warning.
+        if (MAX_CMD_SUBST_BUFFERS > 0) {
+            return cmd_subst_output_pool[MAX_CMD_SUBST_BUFFERS -1];
+        }
+        user_panic("cmd_subst_output_pool out of space and no fallback buffer"); // Should have at least 1 buffer
+    }
+    // Clear the buffer before returning it for fresh use
+    memset(cmd_subst_output_pool[cmd_subst_output_pool_idx], 0, MAX_CMD_SUBST_OUTPUT_LEN);
+    return cmd_subst_output_pool[cmd_subst_output_pool_idx++];
+}
+
+char* execute_command_substitution(const char* command_to_run, int parent_is_interactive) {
+    int pipe_fds[2];
+    int child_pid_for_sh_c; // PID of the 'sh -c "..."' process
+    char *output_buffer = get_subst_output_buffer(); // Get a fresh buffer
+    output_buffer[0] = '\0'; // Ensure it's an empty string initially
+    u_int output_len = 0;
+    char read_char;
+    int r;
+
+    debugf("CmdSubst: Running command: [%s]\n", command_to_run);
+
+    if (pipe(pipe_fds) < 0) {
+        printf("sh: pipe failed for command substitution\n");
+        // Return an empty string from the pool, already null-terminated by get_subst_output_buffer
+        return output_buffer;
+    }
+
+    child_pid_for_sh_c = fork();
+
+    if (child_pid_for_sh_c < 0) {
+        printf("sh: fork failed for command substitution\n");
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return output_buffer; // Return empty string
+    }
+
+    if (child_pid_for_sh_c == 0) { // Child process (will execute sh -c "command_to_run")
+	//printf("enter child\n");
+        close(pipe_fds[0]);    // Child closes its read end of the pipe
+
+        // Redirect child's stdout (fd 1) to the pipe's write end
+        if (dup(pipe_fds[1], 1) < 0) {
+             printf("sh: dup stdout to pipe failed in cmd_subst child\n");
+             exit(); // or specific error code
+        }
+	//printf("finish dup\n");
+        // Optionally, redirect child's stderr (fd 2) to the pipe's write end as well
+        // if (dup(pipe_fds[1], 2) < 0) {
+        //     printf("sh: dup stderr to pipe failed in cmd_subst child\n");
+        //     exit();
+        // }
+        close(pipe_fds[1]);    // Close the original pipe write-end descriptor
+	//printf("after close\n");
+        // Prepare arguments for sh -c "command"
+        // spawn expects char**, and command_to_run might be const.
+        // Also, argv must be null-terminated.
+        char temp_cmd_buffer_for_argv[MAX_INPUT_BUF]; // Ensure enough space
+	//mystrcpy(temp_cmd_buffer_for_argv, "-c");
+        mystrcpy(temp_cmd_buffer_for_argv, command_to_run);
+	//printf("after copy: %s\n", temp_cmd_buffer_for_argv);
+        char *sh_argv[] = {"sh.b", "-c", temp_cmd_buffer_for_argv, NULL};
+
+        // Environment for the sh -c sub-shell:
+        // For simplicity in this step, this sub-shell will not inherit shell variables
+        // from the shell instance that is *performing* the command substitution.
+        // It will inherit process-level environment if MOS/spawn supports that.
+        // To pass current shell's exported vars, similar logic to execute_ast's
+        // spawn_argv preparation would be needed here.
+
+	//printf("pass argv to shell:\n");
+	for (int i = 0; i < 3; i++) {
+		//printf("%s\n", sh_argv[i]);
+	}
+        spawn("/sh.b", sh_argv); // Assumes sh.b is executable and in path/known location
+        //printf("sh: PANIC! spawn for sh -c failed in command substitution for: %s\n", command_to_run);
+        exit(); // Critical error if spawn fails
+    } else { // Parent process (the shell instance that found the backticks)
+        close(pipe_fds[1]); // Parent closes its write end of the pipe
+
+        // Read all output from the child's stdout (which is the pipe's read end)
+        while ((r = read(pipe_fds[0], &read_char, 1)) == 1) {
+            if (output_len < MAX_CMD_SUBST_OUTPUT_LEN - 1) { // Leave space for null terminator
+                output_buffer[output_len++] = read_char;
+            } else {
+                // Output buffer is full, read and discard the rest to allow child to finish
+                debugf("sh: command substitution output too long, truncated.\n");
+                while(read(pipe_fds[0], &read_char, 1) == 1); // Drain pipe
+                break;
+            }
+        }
+        if (r < 0) {
+            printf("sh: error reading from pipe in command substitution\n");
+        }
+        output_buffer[output_len] = '\0'; // Null-terminate the collected output
+
+        close(pipe_fds[0]);    // Close the read end of the pipe
+        wait(child_pid_for_sh_c); // Wait for the 'sh -c "..."' child to complete
+
+        // Post-process the output:
+        // 1. Remove all trailing newline characters (bash typically removes one, but multiple can occur)
+        while (output_len > 0 &&
+               (output_buffer[output_len - 1] == '\n' || output_buffer[output_len - 1] == '\r')) {
+            output_buffer[--output_len] = '\0';
+        }
+
+        // 2. Replace all internal newlines/carriage returns with spaces
+        for (u_int i = 0; i < output_len; ++i) {
+            if (output_buffer[i] == '\n' || output_buffer[i] == '\r') {
+                output_buffer[i] = ' ';
+            }
+        }
+        // Note: Bash also does word splitting on the result if not double-quoted.
+        // This implementation does not do word splitting; the entire (modified) output
+        // becomes a single argument or part of an argument.
+	printf("cmd after sub: %s\n", output_buffer);
+        return output_buffer;
+    }
+    // Should not be reached if fork works as expected
+    return get_subst_output_buffer(); // Return an empty, null-terminated buffer on severe fork failure
+}
+
 void reset_allocators() {
     strdup_pool_index = 0;
     astnode_pool_index = 0;
     redirnode_pool_index = 0;
     expansion_buffer_pool_index = 0;
+    cmd_subst_output_pool_idx = 0;
 }
 
 char *user_strdup(const char *s) {
@@ -218,22 +358,24 @@ Token get_next_raw_token() {
         return token;
     }
 
+    // Handle 2-character operators first
     if (mystrncmp(current_pos, "&&", 2) == 0) {
         token.type = TOKEN_AND;
-        mystrncpy(token.value, "&&", MAX_TOKEN_LEN -1);
-        token.value[MAX_TOKEN_LEN-1] = '\0';
+        mystrncpy(token.value, "&&", 2); // Max length is 2 for these
+        token.value[2] = '\0';
         current_pos += 2;
     } else if (mystrncmp(current_pos, "||", 2) == 0) {
         token.type = TOKEN_OR;
-        mystrncpy(token.value, "||", MAX_TOKEN_LEN-1);
-        token.value[MAX_TOKEN_LEN-1] = '\0';
+        mystrncpy(token.value, "||", 2);
+        token.value[2] = '\0';
         current_pos += 2;
     } else if (mystrncmp(current_pos, ">>", 2) == 0) {
         token.type = TOKEN_REDIR_APP;
-        mystrncpy(token.value, ">>", MAX_TOKEN_LEN-1);
-        token.value[MAX_TOKEN_LEN-1] = '\0';
+        mystrncpy(token.value, ">>", 2);
+        token.value[2] = '\0';
         current_pos += 2;
     }
+    // Handle 1-character operators
     else if (*current_pos == '|') {
         token.type = TOKEN_PIPE;
         token.value[0] = '|'; token.value[1] = '\0';
@@ -242,7 +384,7 @@ Token get_next_raw_token() {
         token.type = TOKEN_SEMI;
         token.value[0] = ';'; token.value[1] = '\0';
         current_pos++;
-    } else if (*current_pos == '&') {
+    } else if (*current_pos == '&') { // Check before '&&' if it wasn't matched
         token.type = TOKEN_AMP;
         token.value[0] = '&'; token.value[1] = '\0';
         current_pos++;
@@ -250,31 +392,90 @@ Token get_next_raw_token() {
         token.type = TOKEN_REDIR_IN;
         token.value[0] = '<'; token.value[1] = '\0';
         current_pos++;
-    } else if (*current_pos == '>') {
+    } else if (*current_pos == '>') { // Check before '>>' if it wasn't matched
         token.type = TOKEN_REDIR_OUT;
         token.value[0] = '>'; token.value[1] = '\0';
         current_pos++;
     }
+    // =======================================================================
+    // NEW: Handle Command Substitution (Backticks)
+    // This check should come BEFORE general TOKEN_WORD processing
+    // =======================================================================
+    else if (*current_pos == '`') {
+        // For simplicity, let's still call it TOKEN_WORD, but its content will be `...`
+        // Alternatively, introduce TOKEN_CMD_SUBST
+        token.type = TOKEN_WORD; // Or your new TOKEN_CMD_SUBST if you add one
+        int i = 0;
+        token.value[i++] = *current_pos++; // Store the opening backtick
+
+        // Read until the matching closing backtick or EOF or buffer full
+        // This simple version does NOT handle nested backticks or escaped backticks.
+        while (*current_pos && i < MAX_TOKEN_LEN - 1) {
+            if (*current_pos == '`') { // Found closing backtick
+                token.value[i++] = *current_pos++; // Store the closing backtick
+                break;                             // Done with this token
+            }
+            token.value[i++] = *current_pos++; // Store char inside backticks
+        }
+        token.value[i] = '\0';
+	printf("token.value: %s\n", token.value);
+        if (i > 1 && token.value[i-1] != '`') { // Started with ` but no closing ` found (or buffer full before it)
+            // This is an unclosed command substitution.
+            // Mark as error, or let parser handle malformed TOKEN_WORD.
+            // For now, it will be a TOKEN_WORD starting with ` but not ending with it properly.
+            // The command substitution logic in parse_command will then likely fail to find
+            // the closing backtick if it relies on the token value itself being well-formed.
+            printf("sh: unclosed backtick\n"); // User feedback
+            token.type = TOKEN_ERROR; // Or handle as a literal word starting with `
+        } else if (i <= 1) { // Just '`' or empty '``' - could be error or literal
+             if (i==1 && token.value[0] == '`' && *current_pos == '\0') { // Just '`' at EOF
+                // Treat as a literal word if needed, or error. Let's assume error for now.
+                token.type = TOKEN_ERROR;
+             }
+             // If '``', it's a valid empty command substitution, token.value will be "``"
+        }
+    }
+    // General TOKEN_WORD processing
     else {
         token.type = TOKEN_WORD;
         int i = 0;
+        // Stop at whitespace, operators, or special shell characters like #
+        // The list of terminators for a WORD now includes '`' because it's handled above.
         while (*current_pos &&
-               !strchr(" \t\r\n", *current_pos) &&
-               !strchr("|;&<>#", *current_pos) && 
+               !strchr(" \t\r\n", *current_pos) &&     // Whitespace
+               !strchr("|;&<>`#", *current_pos) &&   // Operators and backtick (handled above)
+                                                       // '#' for comments is handled by skip_whitespace_and_comments
                i < MAX_TOKEN_LEN - 1) {
-             if (mystrncmp(current_pos, "&&", 2) == 0 || mystrncmp(current_pos, "||", 2) == 0 || mystrncmp(current_pos, ">>", 2) == 0) {
-                break;
+
+            // Check for 2-char operators that might terminate a word if not separated by space
+            if (mystrncmp(current_pos, "&&", 2) == 0 ||
+                mystrncmp(current_pos, "||", 2) == 0 ||
+                mystrncmp(current_pos, ">>", 2) == 0) {
+                break; // Word ends before these operators
             }
             token.value[i++] = *current_pos++;
         }
         token.value[i] = '\0';
-        if (i == 0) { 
-             if (*current_pos == '\0') token.type = TOKEN_EOF;
-             else token.type = TOKEN_ERROR; 
+
+        if (i == 0) { // Should not happen if *current_pos was not null and not an operator
+                      // unless it was just '#' which skip_whitespace handles.
+            if (*current_pos == '\0') { // True EOF after whitespace
+                token.type = TOKEN_EOF;
+            } else {
+                // This case might indicate an issue, e.g. an operator was expected
+                // but something else was found, or an unhandled char.
+                // Or if `skip_whitespace_and_comments` consumes everything.
+                // If skip_whitespace leads to EOF, the top EOF check handles it.
+                // If it leads to an operator, operator checks handle it.
+                // This 'else' for TOKEN_WORD with i==0 is less likely now.
+                token.type = TOKEN_ERROR;
+                 // debugf("Tokenizer: Word parse resulted in empty, char: %c (0x%x)\n", *current_pos, *current_pos);
+            }
         }
     }
     return token;
 }
+
 
 void tokenizer_init(const char *input) { 
     current_pos = input;
@@ -401,17 +602,73 @@ ASTNode *parse_command() {
     ASTNode *cmd_node_ast = alloc_ast_node(NODE_COMMAND);
     CMDNodeData *cmd_data = &cmd_node_ast->data.command;
     RedirNode **next_redir_ptr = &cmd_data->redirects;
+    
+    int parent_shell_is_interactive = iscons(0);
 
     while (1) { // Changed to infinite loop, break out explicitly
         if (current_token.type == TOKEN_WORD) {
-            if (cmd_data->argc < MAX_CMD_ARGS - 1) {
-		     // Expand variables in the token's value
-                char *expanded_arg = expand_string_variables(current_token.value);
-                cmd_data->argv[cmd_data->argc++] = expanded_arg; // user_strdup is now done by expand_string_variables
-            } else {
-                debugf("Too many arguments for command\n");
-                return NULL; 
-            }
+		if (cmd_data->argc < MAX_CMD_ARGS - 1) {
+                char *arg_after_var_expansion = expand_string_variables(current_token.value);
+                char *final_arg_for_argv = arg_after_var_expansion; // Start with variable-expanded arg
+
+                // --- Command Substitution Pass ---
+                // This simplified version handles one level of `` per argument string part.
+                // It rebuilds the argument if substitutions occur.
+                // A more robust parser would integrate this more deeply or use multiple passes.
+                char rebuilt_arg_buffer[MAX_EXPANDED_STR_LEN * 2]; // Temporary buffer for rebuilding arg
+                rebuilt_arg_buffer[0] = '\0';
+                char *current_rebuilt_ptr = rebuilt_arg_buffer;
+                const char *scan_ptr = arg_after_var_expansion;
+		//printf("command word: %s\n", scan_ptr);
+                while (*scan_ptr) {
+                    char *backtick_start = strchr(scan_ptr, '`');
+                    if (backtick_start) {
+                        char *backtick_end = strchr(backtick_start + 1, '`');
+                        if (backtick_end) {
+                            // Copy part before the first backtick
+                            if (backtick_start > scan_ptr) {
+                                mystrncpy(current_rebuilt_ptr, scan_ptr, backtick_start - scan_ptr);
+                                current_rebuilt_ptr += (backtick_start - scan_ptr);
+				//printf("rebuilt: %s\n", current_rebuilt_ptr);
+                            }
+
+                            // Extract command for substitution
+                            char cmd_to_subst[MAX_INPUT_BUF];
+                            int cmd_len = backtick_end - (backtick_start + 1);
+                            if (cmd_len >= MAX_INPUT_BUF) cmd_len = MAX_INPUT_BUF -1; // Truncate if too long
+                            mystrncpy(cmd_to_subst, backtick_start + 1, cmd_len);
+                            cmd_to_subst[cmd_len] = '\0';
+			    //printf("cmd_to_subst: %s\n", cmd_to_subst);
+                            // Execute substitution
+                            char *subst_output = execute_command_substitution(cmd_to_subst, parent_shell_is_interactive);
+                            if (subst_output) { // subst_output is already processed (newlines stripped/replaced)
+                                mystrcat(current_rebuilt_ptr, subst_output); // Append result
+                                current_rebuilt_ptr += mystrlen(subst_output);
+                            }
+                            scan_ptr = backtick_end + 1; // Continue scanning after the closing backtick
+                        } else { // Unmatched opening backtick, treat literally
+                            mystrcat(current_rebuilt_ptr, scan_ptr);
+                            current_rebuilt_ptr += mystrlen(scan_ptr);
+                            scan_ptr += mystrlen(scan_ptr); // Go to end
+                        }
+                    } else { // No more backticks in the remainder of the string
+                        mystrcat(current_rebuilt_ptr, scan_ptr);
+                        current_rebuilt_ptr += mystrlen(scan_ptr);
+                        break; // Done with this argument string
+                    }
+                }
+                *current_rebuilt_ptr = '\0'; // Null terminate the rebuilt argument
+
+                if (rebuilt_arg_buffer[0] != '\0' || arg_after_var_expansion[0] == '\0') { // If something was rebuilt or original was empty
+                    final_arg_for_argv = user_strdup(rebuilt_arg_buffer);
+                } else { // No substitutions, or only var expansion happened
+                    final_arg_for_argv = user_strdup(arg_after_var_expansion); // strdup the var-expanded one
+                }
+                // --- End Command Substitution Pass ---
+
+                cmd_data->argv[cmd_data->argc++] = final_arg_for_argv;
+		//printf("final_arg_for_argv: %s\n", final_arg_for_argv);
+            } else { /* ... too many args ... */ return NULL; }
             consume_token();
         } else if (current_token.type == TOKEN_REDIR_IN ||
                    current_token.type == TOKEN_REDIR_OUT ||
@@ -886,6 +1143,13 @@ void execute_ast(ASTNode *node) {
 			}
 			spawn_ret = spawn(cmd->argv[0], spawn_argv);
 		} else {
+			int i=0;
+			//printf("cmd: ");
+			char **argv2 = (char **)cmd->argv;
+			while(argv2[i] != NULL) {
+				//printf("%s ",argv2[i++]);
+			}
+			//printf("\n");
                		spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); 
 		}
                 if (spawn_ret < 0) {
@@ -1338,13 +1602,51 @@ int main(int argc, char **argv) {
     int interactive = iscons(0);
     int echocmds = 0; 
     int initial_arg_idx = 0; // For parsing ARGBEGIN
+    char *command_string_from_arg = NULL;
+    int arg_idx_after_opts = 1; // To track where positional args start
 
-    printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
-    printf("::                                                         ::\n");
-    printf("::                 MOS Shell (New Arch)                    ::\n");
-    printf("::                                                         ::\n");
-    printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    //printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    //printf("::                                                         ::\n");
+    //printf("::                 MOS Shell (New Arch)                    ::\n");
+    //printf("::                                                         ::\n");
+    //printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 
+    //printf("shell receive %d arg: ", argc);
+    for (int i = 0; i < argc; i++) {
+	//printf("%s ", argv[i]);
+    }
+    if (arg_idx_after_opts < argc && mystrcmp(argv[arg_idx_after_opts], "-c") == 0) {
+        if (arg_idx_after_opts + 1 < argc) {
+            command_string_from_arg = argv[arg_idx_after_opts + 1];
+            interactive = 0; // -c implies non-interactive
+            // echocmds might still be true if -x was also passed
+        } else {
+            printf("sh: -c option requires an argument\n");
+            exit();
+        }
+    } else if (arg_idx_after_opts < argc) { // Script file is the first positional argument
+        // ... existing script file opening logic using argv[arg_idx_after_opts] ...
+        // Ensure command_string_from_arg remains NULL
+    }
+    if (command_string_from_arg) {
+	//printf("shell get: %s\n", command_string_from_arg);
+        // Execute the command string from -c argument
+        reset_allocators(); // Includes reset_subst_output_pool_idx();
+        mystrcpy(input_buf, command_string_from_arg);
+
+        if (echocmds) printf("+ %s\n", input_buf); // Echo if -x
+
+        const char* temp_scan = input_buf;
+        while (*temp_scan && strchr(" \t\r\n", *temp_scan)) temp_scan++;
+        if (*temp_scan != '#' && *temp_scan != '\0') {
+            tokenizer_init(input_buf);
+            ASTNode *ast = parse_line();
+            if (ast) {
+                execute_ast(ast);
+            } else { /* syntax error printing */ }
+        }
+        exit(); // sh -c "..." exits after the command
+    }
     ARGBEGIN {
     case 'i':
         interactive = 1;
@@ -1352,6 +1654,14 @@ int main(int argc, char **argv) {
     case 'x':
         echocmds = 1;
         break;
+    case 'c': // New option for command string
+        // ARGBEGIN usually handles argument fetching.
+        // If it doesn't, we need to manually get the next arg.
+        // Assuming ARGBEGIN leaves ARGF() pointing to the command string for -c.
+        // Or, more traditionally:
+        // command_string_from_arg = ARGF(); // If ARGBEGIN sets this up
+        // Let's do manual parsing for -c after ARGBEGIN for clarity here.
+        break; 
     default:
         usage();
     }
