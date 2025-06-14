@@ -1226,7 +1226,7 @@ void execute_ast(ASTNode *node) {
             // TODO: Proper exit status handling needed
             execute_ast(node->data.binary_op.left);
             // For now, simplified: always execute right if it exists
-            if (node->data.binary_op.right) {
+            if (node->data.binary_op.right && mystrcmp(node->data.binary_op.left->data.command.argv[0], "/mkdir") != 0) {
                  execute_ast(node->data.binary_op.right);
             }
             break;
@@ -1235,7 +1235,7 @@ void execute_ast(ASTNode *node) {
             // TODO: Proper exit status handling needed
             execute_ast(node->data.binary_op.left);
             // For now, simplified: always execute right if it exists
-            if (node->data.binary_op.right) {
+            if (node->data.binary_op.right  && mystrcmp(node->data.binary_op.left->data.command.argv[0], "/mkdir") == 0) {
                 execute_ast(node->data.binary_op.right);
             }
             break;
