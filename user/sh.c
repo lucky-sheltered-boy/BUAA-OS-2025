@@ -1606,11 +1606,6 @@ int main(int argc, char **argv) {
     char *command_string_from_arg = NULL;
     int arg_idx_after_opts = 1; // To track where positional args start
 
-    //printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
-    //printf("::                                                         ::\n");
-    //printf("::                 MOS Shell (New Arch)                    ::\n");
-    //printf("::                                                         ::\n");
-    //printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
 
     //printf("shell receive %d arg: ", argc);
     for (int i = 0; i < argc; i++) {
@@ -1648,6 +1643,13 @@ int main(int argc, char **argv) {
         }
         exit(); // sh -c "..." exits after the command
     }
+
+    printf("\n:::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    printf("::                                                         ::\n");
+    printf("::                 MOS Shell (New Arch)                    ::\n");
+    printf("::                                                         ::\n");
+    printf(":::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+
     ARGBEGIN {
     case 'i':
         interactive = 1;
