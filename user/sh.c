@@ -177,7 +177,7 @@ char* execute_command_substitution(const char* command_to_run, int parent_is_int
     char read_char;
     int r;
 
-    debugf("CmdSubst: Running command: [%s]\n", command_to_run);
+    //debugf("CmdSubst: Running command: [%s]\n", command_to_run);
 
     if (pipe(pipe_fds) < 0) {
         printf("sh: pipe failed for command substitution\n");
@@ -266,13 +266,13 @@ char* execute_command_substitution(const char* command_to_run, int parent_is_int
         // 2. Replace all internal newlines/carriage returns with spaces
         for (u_int i = 0; i < output_len; ++i) {
             if (output_buffer[i] == '\n' || output_buffer[i] == '\r') {
-                output_buffer[i] = ' ';
+                output_buffer[i] = '\0';
             }
         }
         // Note: Bash also does word splitting on the result if not double-quoted.
         // This implementation does not do word splitting; the entire (modified) output
         // becomes a single argument or part of an argument.
-	printf("cmd after sub: %s\n", output_buffer);
+	//printf("cmd after sub: %s\n", output_buffer);
         return output_buffer;
     }
     // Should not be reached if fork works as expected
@@ -418,7 +418,7 @@ Token get_next_raw_token() {
             token.value[i++] = *current_pos++; // Store char inside backticks
         }
         token.value[i] = '\0';
-	printf("token.value: %s\n", token.value);
+	//printf("token.value: %s\n", token.value);
         if (i > 1 && token.value[i-1] != '`') { // Started with ` but no closing ` found (or buffer full before it)
             // This is an unclosed command substitution.
             // Mark as error, or let parser handle malformed TOKEN_WORD.
@@ -1076,6 +1076,7 @@ void execute_ast(ASTNode *node) {
 	    	execute_inner_cmd(cmd);
 		break;
 	    }
+	    //printf("%s is outer command\n", cmd->argv[0]);
             child_pid = fork();
             if (child_pid < 0) {
                 user_panic("execute_ast: fork for command failed");
@@ -1144,12 +1145,12 @@ void execute_ast(ASTNode *node) {
 			spawn_ret = spawn(cmd->argv[0], spawn_argv);
 		} else {
 			int i=0;
-			//printf("cmd: ");
+			printf("");
 			char **argv2 = (char **)cmd->argv;
 			while(argv2[i] != NULL) {
-				//printf("%s ",argv2[i++]);
+				printf("",argv2[i++]);
 			}
-			//printf("\n");
+			printf("");
                		spawn_ret = spawn(cmd->argv[0], (char **)cmd->argv); 
 		}
                 if (spawn_ret < 0) {

@@ -61,6 +61,19 @@ void mkdir(char *path) {
 
 int main(int argc, char **argv) {
     char s[5] = "-p";
+    printf("receive mkdir command:\n");
+    for (int i = 0; i < argc; i++) {
+	char *p = argv[i];
+	while (*p != '\0') {
+		if (*p == ' ') {
+			*p = '\0';
+		} else {
+			p++;
+		}
+	}
+    	//printf("\"%s\"", argv[i]);
+    }
+    printf("\n");
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], s) == 0) {
             argv[i] = 0;
